@@ -1,0 +1,8 @@
+PySide6-Essentials==6.8.3
+Telethon>=1.40,<2
+filetype>=1.2,<2
+mutagen>=1.47,<2
+pypdf>=5,<7
+tzdata>=2025.1
+PySocks>=1.7,<2
+jdatetime>=5,<6
