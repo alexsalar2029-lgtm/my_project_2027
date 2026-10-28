@@ -16,9 +16,10 @@ from zoneinfo import ZoneInfo
 KINDS = {"photo": "تصویر", "video": "ویدئو", "audio": "صوت", "document": "سند / فایل"}
 STATES = {"queued": "در صف", "sending": "در حال ارسال", "sent": "ارسال شد",
           "failed": "خطا؛ نیاز به بررسی", "uncertain": "نتیجه نامشخص؛ تلگرام را بررسی کنید", "skipped": "کنار گذاشته شد"}
-DEFAULTS = {"folder": "", "recursive": False, "interval": 10, "start": "09:00", "end": "22:00",
+DEFAULTS = {"folder": "", "recursive": False, "interval": 10, "start": "00:00", "end": "00:00",
             "days": list(range(7)), "timezone": "Asia/Tehran", "template": "{title}\n{type} • {size}",
-            "prefix": "", "auto_scan": True, "not_before": "", "api_id": "", "target": "me"}
+            "prefix": "", "auto_scan": True, "not_before": "", "api_id": "", "target": "me",
+            "version": 2, "calendar": "jalali", "window_enabled": False, "as_document": False}
 
 
 def utf16_trim(text: str, limit: int = 1000) -> str:
@@ -53,7 +54,7 @@ def inspect_file(path: Path) -> dict:
     guessed = filetype.guess(str(path))
     mime = guessed.mime if guessed else (mimetypes.guess_type(path.name)[0] or "application/octet-stream")
     kind = "document"
-    if mime in {"image/jpeg", "image/png"}:
+    if mime.startswith("image/") and mime != "image/gif":
         kind = "photo"
     elif mime == "image/gif":
         kind = "video"
@@ -111,6 +112,34 @@ def allowed_at(now: datetime, config: dict) -> bool:
         (local - timedelta(days=1)).weekday() in config["days"] and clock < end)
 
 
+def next_due(now: datetime, config: dict, minimum: float = 0) -> datetime | None:
+    """Return the next permitted UTC instant, including overnight and start-date rules."""
+    from datetime import timezone
+    zone = ZoneInfo(config.get("timezone", "Asia/Tehran"))
+    candidate = max(now.astimezone(timezone.utc), datetime.fromtimestamp(minimum, timezone.utc))
+    if config.get("not_before"):
+        earliest = datetime.fromisoformat(config["not_before"])
+        if earliest.tzinfo is None:
+            earliest = earliest.replace(tzinfo=zone)
+        candidate = max(candidate, earliest.astimezone(timezone.utc))
+    sh, sm = map(int, config["start"].split(":"))
+    eh, em = map(int, config["end"].split(":"))
+    if (sh, sm) == (eh, em):
+        sh = sm = eh = em = 0
+    for offset in range(-1, 9):
+        day = candidate.astimezone(zone).date() + timedelta(days=offset)
+        if day.weekday() not in config["days"]:
+            continue
+        beginning = datetime(day.year, day.month, day.day, sh, sm, tzinfo=zone)
+        ending = datetime(day.year, day.month, day.day, eh, em, tzinfo=zone)
+        if (sh, sm) >= (eh, em):
+            ending += timedelta(days=1)
+        beginning, ending = beginning.astimezone(timezone.utc), ending.astimezone(timezone.utc)
+        if candidate < ending:
+            return max(candidate, beginning)
+    return None
+
+
 class Store:
     def __init__(self, path: Path):
         self.path = path
@@ -145,6 +174,10 @@ class Store:
 
     def enqueue(self, scope: str, path: Path, info: dict, hash_: str, stat) -> bool:
         with self.connect() as db:
+            if not scope.startswith("preview:"):
+                staged = db.execute("SELECT title FROM jobs WHERE hash=? AND scope LIKE 'preview:%' ORDER BY id DESC LIMIT 1", (hash_,)).fetchone()
+                if staged:
+                    info = {**info, "title": staged["title"]}
             c = db.execute("""INSERT OR IGNORE INTO jobs
               (scope,hash,path,size,mtime,title,kind,mime,created) VALUES(?,?,?,?,?,?,?,?,?)""",
               (scope, hash_, str(path), stat.st_size, stat.st_mtime_ns,
@@ -177,6 +210,7 @@ class Scanner:
         self.store = store
         self.seen = {}
         self.cached = {}
+        self.last_report = {}
 
     def scan(self, config: dict, scope: str) -> int:
         root = Path(config["folder"]).resolve()
@@ -184,6 +218,7 @@ class Scanner:
             raise ValueError("پوشهٔ انتخاب‌شده در دسترس نیست.")
         paths = root.rglob("*") if config.get("recursive") else root.glob("*")
         count = 0
+        report = {"found": 0, "waiting": 0, "duplicates": 0, "ignored": 0, "errors": []}
         for path in sorted(paths):
             if path.is_symlink() or not path.is_file() or path.name.startswith("."):
                 continue
@@ -193,16 +228,23 @@ class Scanner:
             if path.resolve().is_relative_to(self.store.path.parent.resolve()):
                 continue
             try:
+                report["found"] += 1
                 stat = path.stat()
                 signature = (stat.st_size, stat.st_mtime_ns)
                 previous, since = self.seen.get(str(path), (None, time.monotonic()))
                 if previous != signature:
                     self.seen[str(path)] = (signature, time.monotonic())
+                    report["waiting"] += 1
                     continue
-                if time.monotonic() - since < 15 or time.time() - stat.st_mtime < 15 or not stat.st_size:
+                if time.monotonic() - since < 2 or time.time() - stat.st_mtime < 2:
+                    report["waiting"] += 1
+                    continue
+                if not stat.st_size:
+                    report["ignored"] += 1
                     continue
                 cache_key = (scope, str(path), signature)
                 if cache_key in self.cached:
+                    report["duplicates"] += 1
                     continue
                 hash_ = digest(path)
                 after = path.stat()
@@ -211,8 +253,11 @@ class Scanner:
                 info = inspect_file(path)
                 count += self.store.enqueue(scope, path.resolve(), info, hash_, stat)
                 self.cached[cache_key] = True
-            except (OSError, ValueError):
+            except (OSError, ValueError) as exc:
+                report["errors"].append(path.name + ': ' + type(exc).__name__)
                 continue
+        report["added"] = count
+        self.last_report = report
         return count
 
 

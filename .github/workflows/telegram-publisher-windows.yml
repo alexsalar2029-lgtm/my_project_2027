@@ -44,3 +44,18 @@ jobs:
             TelegramPublisher/src/windows-selftest.json
             TelegramPublisher/src/windows-selftest.png
           retention-days: 30
+      - name: Publish the tested EXE and its verification report
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $hash = (Get-FileHash '.\dist\TelegramPublisher.exe' -Algorithm SHA256).Hash.ToLower()
+          "$hash  TelegramPublisher.exe" | Set-Content -Encoding ascii TelegramPublisher.sha256
+          $tag = 'telegram-publisher-v2.0.0'
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title 'Telegram Publisher 2.0.0 - Windows x64' --notes-file release-notes.md
+            if ($LASTEXITCODE -ne 0) { throw 'Release creation failed' }
+          }
+          gh release upload $tag '.\dist\TelegramPublisher.exe' 'TelegramPublisher.sha256' 'windows-selftest.json' 'windows-selftest.png' --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Release asset upload failed' }

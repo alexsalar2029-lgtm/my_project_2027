@@ -10,6 +10,7 @@ from unittest.mock import patch
 from core import DEFAULTS, Scanner, Store, allowed_at, caption, clean_title, digest, inspect_file, utf16_trim
 from engine import Engine
 from telethon import errors
+from telethon.tl.types import InputFile
 
 
 class Fixture(unittest.TestCase):
@@ -21,7 +22,7 @@ class Fixture(unittest.TestCase):
         self.data.mkdir()
         self.source.mkdir()
         self.store = Store(self.data / "queue.db")
-        self.path = self.source / "lesson_01.pdf"
+        self.path = self.source / "lesson_01.txt"
         self.path.write_bytes(b"hello sample content")
         self.info = {"title": "درس اول", "kind": "document", "mime": "application/pdf"}
         self.config = {**DEFAULTS, "folder": str(self.source), "timezone": "UTC", "start": "00:00", "end": "00:00"}
@@ -112,6 +113,10 @@ class Fixture(unittest.TestCase):
         self.add()
         engine = Engine(self.data, self.config, self.store)
         engine.client = fake
+        if not hasattr(fake, 'upload_file'):
+            async def upload(path, file_name, progress_callback):
+                return InputFile(1, 1, file_name, 'test')
+            fake.upload_file = upload
         engine.scope = "1:1"
         engine.entity = "me"
         engine.active = True
@@ -121,9 +126,11 @@ class Fixture(unittest.TestCase):
     def test_send_success_records_receipt_and_preserves_filename(self):
         seen = []
         class Fake:
-            async def send_file(self, target, path, **kwargs):
-                seen.append(Path(path).name)
+            async def upload_file(self, path, file_name, **kwargs):
+                seen.append(file_name)
                 self.assert_content = Path(path).read_bytes()
+                return InputFile(1, 1, file_name, 'test')
+            async def send_file(self, target, media, **kwargs):
                 return SimpleNamespace(id=88)
         engine, row = self.engine(Fake())
         asyncio.run(engine.send(row))

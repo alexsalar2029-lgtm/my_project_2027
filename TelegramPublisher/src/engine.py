@@ -15,7 +15,9 @@ from telethon import TelegramClient, errors, utils
 from telethon.sessions import StringSession
 
 import vault
-from core import Scanner, Store, allowed_at, caption, digest, save_config
+from core import Scanner, Store, allowed_at, caption, digest, save_config, next_due
+from calendar_ui import display_instant
+from media import telegram_media
 
 
 def friendly(error: Exception) -> str:
@@ -64,6 +66,8 @@ class Engine(QThread):
     progress = Signal(int)
     timing = Signal(str)
     busy = Signal(bool)
+    error = Signal(str)
+    scan_status = Signal(str)
 
     def __init__(self, data: Path, config: dict, store: Store):
         super().__init__()
@@ -82,10 +86,15 @@ class Engine(QThread):
         self.initial_scan_pending = False
         self.next_at = 0
         self.stopping = False
+        self.pending = []
+        self.pending_lock = threading.Lock()
 
     def submit(self, name: str, payload=None):
-        if self.loop and self.queue:
-            self.loop.call_soon_threadsafe(self.queue.put_nowait, (name, payload))
+        with self.pending_lock:
+            if self.loop and self.queue:
+                self.loop.call_soon_threadsafe(self.queue.put_nowait, (name, payload))
+            else:
+                self.pending.append((name, payload))
 
     def pause_now(self):
         # Safe even while network I/O is blocked. Current upload may still finish.
@@ -111,7 +120,11 @@ class Engine(QThread):
 
     async def main(self):
         self.loop = asyncio.get_running_loop()
-        self.queue = asyncio.Queue()
+        with self.pending_lock:
+            self.queue = asyncio.Queue()
+            for command in self.pending:
+                self.queue.put_nowait(command)
+            self.pending.clear()
         self.gate = asyncio.Lock()
         scheduler = asyncio.create_task(self.scheduler())
         try:
@@ -134,14 +147,36 @@ class Engine(QThread):
                                 result.append((dialog.name, str(utils.get_peer_id(dialog.entity))))
                             self.dialogs.emit(result)
                             self.log.emit(f"{len(result)} مقصد دریافت شد.")
-                        elif name in {"prepare", "start"}:
+                        elif name in {"inspect", "prepare", "start", "send_now"}:
                             self.paused.set()
                             self.active = False
                             self.running.emit(False)
-                            self.config = dict(payload)
+                            self.config = dict(payload["config"] if name == "send_now" else payload)
                             save_config(self.data / "settings.json", self.config)
-                            await self.resolve()
-                            await self.scan()
+                            if name == "inspect":
+                                self.scope = "preview:" + hashlib.sha256(self.config["folder"].encode()).hexdigest()[:16]
+                                self.entity = None
+                                self.destination.emit(self.scope, "پیش‌نمایش پوشه؛ هنوز مقصد ارسال تأیید نشده")
+                            else:
+                                await self.resolve()
+                            if name == "send_now":
+                                source = payload["row"]
+                                self.store.enqueue(self.scope, Path(source["path"]), source, source["hash"], Path(source["path"]).stat())
+                                row = next(r for r in self.store.rows(self.scope) if r["hash"] == source["hash"])
+                                if row["status"] != "queued":
+                                    raise ValueError("این محتوا قبلاً ارسال شده یا نیاز به تعیین وضعیت دارد؛ صف مقصد را بررسی کنید.")
+                                self.running.emit(True)
+                                self.paused.clear()
+                                try:
+                                    await self.send(row, immediate=True)
+                                finally:
+                                    self.paused.set()
+                                    self.running.emit(False)
+                            else:
+                                self.scan_status.emit("در حال بررسی فایل‌ها؛ لطفاً صبر کنید…")
+                                await self.scan()
+                                await asyncio.sleep(2.1)
+                                await self.scan()
                             self.initial_scan_pending = True
                             if name == "start":
                                 last = float(self.store.state("last:" + self.scope, "0"))
@@ -170,7 +205,9 @@ class Engine(QThread):
                             self.log.emit("از حساب خارج شدید و نشست محلی حذف شد.")
                             self.running.emit(False)
                 except Exception as exc:
-                    self.log.emit(str(exc) if isinstance(exc, ValueError) else friendly(exc))
+                    message = str(exc) if isinstance(exc, ValueError) else friendly(exc)
+                    self.log.emit(message)
+                    self.error.emit(message)
                 finally:
                     self.busy.emit(False)
                     self.changed.emit()
@@ -243,7 +280,16 @@ class Engine(QThread):
             raise ValueError("مقصد را انتخاب کنید.")
         if target.lstrip("-").isdigit():
             target = int(target)
+            # StringSession has no persistent entity cache. Resolve numeric peers from dialogs.
+            async for dialog in self.client.iter_dialogs():
+                if utils.get_peer_id(dialog.entity) == target:
+                    target = dialog.entity
+                    break
         entity = await self.client.get_entity(target)
+        if getattr(entity, "broadcast", False) and not getattr(entity, "creator", False):
+            rights = getattr(entity, "admin_rights", None)
+            if not rights or not rights.post_messages:
+                raise ValueError("این حساب در کانال انتخاب‌شده اجازهٔ انتشار ندارد.")
         me = await self.client.get_me()
         self.entity = await self.client.get_input_entity(entity)
         self.scope = f"{me.id}:{utils.get_peer_id(entity)}"
@@ -259,6 +305,10 @@ class Engine(QThread):
         self.changed.emit()
         if count:
             self.log.emit(f"{count} فایل تازه به صف افزوده شد.")
+        report = self.scanner.last_report
+        self.scan_status.emit(f"{report.get('found',0)} فایل بررسی شد · {report.get('waiting',0)} در انتظار اتمام کپی · {len(report.get('errors',[]))} خطا")
+        for error in report.get('errors', [])[:5]:
+            self.log.emit("بررسی فایل: " + error)
 
     async def scheduler(self):
         while True:
@@ -274,10 +324,11 @@ class Engine(QThread):
                         self.timing.emit("ارسال متوقف است")
                         continue
                     if not allowed_at(datetime.now(timezone.utc), self.config):
-                        self.timing.emit("در انتظار روز و بازهٔ زمانی مجاز")
+                        due = next_due(datetime.now(timezone.utc), self.config, self.next_at)
+                        self.timing.emit("ارسال بعدی: " + display_instant(due, self.config['timezone'], self.config.get('calendar','jalali')) if due else "روز مجازی برای ارسال انتخاب نشده")
                         continue
                     if time.time() < self.next_at:
-                        self.timing.emit(f"ارسال بعدی: {max(0, int(self.next_at - time.time()))} ثانیهٔ دیگر")
+                        self.timing.emit("ارسال بعدی: " + display_instant(datetime.fromtimestamp(self.next_at, timezone.utc), self.config['timezone'], self.config.get('calendar','jalali')))
                         continue
                     row = next((r for r in self.store.rows(self.scope) if r["status"] == "queued"), None)
                     if not row:
@@ -293,14 +344,14 @@ class Engine(QThread):
                     self.running.emit(False)
                     self.log.emit(str(exc) if isinstance(exc, ValueError) else friendly(exc))
 
-    async def send(self, row: dict):
+    async def send(self, row: dict, immediate=False):
         temp = None
         started = False
         try:
             if row["size"] > 2 * 1024**3:
                 raise ValueError("این نسخه فایل‌های بزرگ‌تر از ۲ گیگابایت را ارسال نمی‌کند.")
             temp = await asyncio.to_thread(snapshot, row, self.data)
-            if self.paused.is_set() or not allowed_at(datetime.now(timezone.utc), self.config):
+            if self.paused.is_set() or (not immediate and not allowed_at(datetime.now(timezone.utc), self.config)):
                 return
             # A snapshot prevents a changing source file from changing an upload.
             self.store.update(row["id"], status="sending", error="")
@@ -310,23 +361,13 @@ class Engine(QThread):
                 if time.monotonic() - last_progress[0] > .3 or sent == total:
                     self.progress.emit(int(sent * 100 / max(total, 1)))
                     last_progress[0] = time.monotonic()
-            attrs = []
-            if row["kind"] == "audio":
-                from telethon.tl.types import DocumentAttributeAudio
-                duration = 0
-                try:
-                    from mutagen import File
-                    metadata = await asyncio.to_thread(File, str(temp))
-                    duration = int(metadata.info.length) if metadata else 0
-                except Exception:
-                    pass
-                attrs = [DocumentAttributeAudio(duration=duration, title=row["title"])]
+            uploaded = await self.client.upload_file(str(temp), file_name=Path(row['path']).name, progress_callback=progress)
+            if self.paused.is_set():
+                self.store.update(row['id'], status='queued', error='ارسال پیش از انتشار متوقف شد.')
+                return
+            media = telegram_media(uploaded, row, self.config.get('as_document', False))
             started = True
-            result = await self.client.send_file(self.entity, str(temp), caption=caption(row, self.config),
-                parse_mode=None, force_document=row["kind"] == "document" or (row["kind"] == "photo" and row["size"] > 10 * 1024**2),
-                mime_type=row["mime"],
-                supports_streaming=row["mime"] == "video/mp4", attributes=attrs or None,
-                progress_callback=progress)
+            result = await self.client.send_file(self.entity, media, caption=caption(row, self.config), parse_mode=None)
             now = time.time()
             self.store.update(row["id"], status="sent", sent_at=now, message_id=result.id, error="")
             self.store.set_state("last:" + self.scope, str(now))
