@@ -52,10 +52,16 @@ jobs:
           $hash = (Get-FileHash '.\dist\TelegramPublisher.exe' -Algorithm SHA256).Hash.ToLower()
           "$hash  TelegramPublisher.exe" | Set-Content -Encoding ascii TelegramPublisher.sha256
           $tag = 'telegram-publisher-v2.0.0'
+          $latest = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/heads/telegram-publisher-v2" --jq '.object.sha'
+          if ($latest -ne $env:GITHUB_SHA) { Write-Output 'Superseded by a newer build'; exit 0 }
           gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -ne 0) {
             gh release create $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title 'Telegram Publisher 2.0.0 - Windows x64' --notes-file release-notes.md
             if ($LASTEXITCODE -ne 0) { throw 'Release creation failed' }
+          } else {
+            gh api --method PATCH "repos/$env:GITHUB_REPOSITORY/git/refs/tags/$tag" -f "sha=$env:GITHUB_SHA" -F force=false
+            if ($LASTEXITCODE -ne 0) { throw 'Release source update failed' }
+            gh release edit $tag --repo $env:GITHUB_REPOSITORY --notes-file release-notes.md
           }
           gh release upload $tag '.\dist\TelegramPublisher.exe' 'TelegramPublisher.sha256' 'windows-selftest.json' 'windows-selftest.png' --repo $env:GITHUB_REPOSITORY --clobber
           if ($LASTEXITCODE -ne 0) { throw 'Release asset upload failed' }

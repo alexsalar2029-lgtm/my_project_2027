@@ -120,6 +120,7 @@ class GuiFlowTests(unittest.TestCase):
         picker.year.setValue(1405);picker.month.setValue(8);picker.day.setValue(6)
         from PySide6.QtCore import QTime
         picker.time.setTime(QTime(10,0))
+        self.assertEqual(picker.time.text(),'10:00')
         expected=picker.instant()
         picker.calendar.setCurrentIndex(1)
         self.assertEqual(picker.instant(),expected)
