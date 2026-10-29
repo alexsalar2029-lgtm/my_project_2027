@@ -5,6 +5,7 @@ import re
 import time
 from decimal import Decimal, InvalidOperation
 from social import DEFAULT_LINKS, validate_links
+from model_output import ModelOutputError
 
 LANGS = ('fa', 'en', 'ar', 'es')
 DIGITS = str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩', '01234567890123456789')
@@ -118,31 +119,43 @@ def ingest(store, updates, configured, cursor_key):
         db.execute('INSERT OR REPLACE INTO assistant_state VALUES(?,?)', (cursor_key,str(offset)))
 
 
-def localized(value, maximum):
-    if not isinstance(value, dict) or set(value) != set(LANGS):
-        raise ValueError('invalid_translations')
-    if any(not isinstance(v, str) or not v.strip() or len(v) > maximum for v in value.values()):
-        raise ValueError('invalid_text')
-    return {key:value[key].strip() for key in LANGS}
+def localized(value, maximum, field):
+    if not isinstance(value, dict):
+        raise ModelOutputError('model_'+field+'_object')
+    output = {}
+    for lang in LANGS:
+        prefix = 'model_'+field+'_'+lang+'_'
+        if lang not in value:
+            raise ModelOutputError(prefix+'missing')
+        if not isinstance(value[lang], str):
+            raise ModelOutputError(prefix+'not_text')
+        text = value[lang].strip()
+        if field == 'title':
+            text = ' '.join(text.split())
+        if not text:
+            raise ModelOutputError(prefix+'empty')
+        if len(text) > maximum:
+            raise ModelOutputError(prefix+'too_long')
+        output[lang] = text
+    return output
 
 
 def validate(result, source):
     if not isinstance(result, dict) or result.get('kind') not in ('sale','tutorial','article','ignore'):
-        raise ValueError('invalid_classification')
+        raise ModelOutputError('model_classification_invalid')
     if result['kind'] == 'ignore':
         return {'kind':'ignore'}
-    item = {'kind':result['kind'], 'title':localized(result.get('title'),180),
-            'summary':localized(result.get('summary'),700), 'body':localized(result.get('body'),6000)}
+    item = {'kind':result['kind'], 'title':localized(result.get('title'),180,'title'),
+            'summary':localized(result.get('summary'),700,'summary'), 'body':localized(result.get('body'),6000,'body')}
     generic_titles = {'عنوان', 'عنوان محصول', 'پیشنهاد ویژه', 'پست جدید', 'توضیحات محصول',
                       'product title', 'special offer', 'new post', 'untitled',
                       'عنوان المنتج', 'عرض خاص', 'عنوان المنشور',
                       'título del producto', 'oferta especial', 'nueva publicación'}
     for lang in LANGS:
         title = item['title'][lang]
-        if (title.casefold().strip(' .!؟?') in generic_titles or '\n' in title or
-                re.fullmatch(r'[^\s/]+\.(?:mp4|mkv|mov|zip|rar|jpg|png|pdf)',title,re.I) or
-                item['body'][lang].casefold() == item['summary'][lang].casefold()):
-            raise ValueError('uninformative_content')
+        if (title.casefold().strip(' .!؟?') in generic_titles or
+                re.fullmatch(r'[^\s/]+\.(?:mp4|mkv|mov|zip|rar|jpg|png|pdf)',title,re.I)):
+            raise ModelOutputError('model_title_'+lang+'_generic')
     item['brand'] = detected_brand(source, item['title'], result.get('brand'))
     # A claimed price is published only when its exact amount AND currency are present in the source.
     item['price'] = None
@@ -173,10 +186,19 @@ def process_one(store, model, max_attempts=5):
         return False
     try:
         media=json.loads(job['media']) if job['media'] else []
-        item = validate(model.analyze(job['text'],media), job['text'])
+        try:
+            item = validate(model.analyze(job['text'],media), job['text'])
+        except ModelOutputError as problem:
+            repair = getattr(model, 'repair', None)
+            if not callable(repair):
+                raise
+            # One corrective attempt, with the specific validation issue and original evidence.
+            # Network/authentication failures use the existing backoff without an extra call.
+            item = validate(repair(job['text'],media,problem), job['text'])
     except Exception as exc:
         # Never log provider errors or request URLs: Telegram URLs contain a token.
-        code = 'model_response_invalid' if isinstance(exc, ValueError) else getattr(exc,'code','provider_unavailable')
+        code = (exc.code if isinstance(exc, ModelOutputError) else
+                'model_response_invalid' if isinstance(exc, ValueError) else getattr(exc,'code','provider_unavailable'))
         attempts = job['attempts']+1
         with store.db() as db:
             db.execute('UPDATE assistant_jobs SET attempts=?,status=?,retry_at=?,error=? WHERE key=? AND digest=?',
@@ -222,8 +244,15 @@ def requeue_published(store):
             AND key IN (SELECT key FROM assistant_posts)""", (int(time.time()),)).rowcount
 
 
+def requeue_failed(store):
+    with store.db() as db:
+        return db.execute("""UPDATE assistant_jobs SET status='pending',attempts=0,
+            retry_at=0,error='',updated=? WHERE status IN ('retry','failed')""",
+            (int(time.time()),)).rowcount
+
+
 def status(store):
     with store.db() as db:
         counts = dict(db.execute('SELECT status,count(*) FROM assistant_jobs GROUP BY status').fetchall())
-        recent = [dict(row) for row in db.execute('SELECT message,status,error,updated FROM assistant_jobs ORDER BY updated DESC LIMIT 20')]
+        recent = [dict(row) for row in db.execute('SELECT message,status,error,attempts,retry_at,updated FROM assistant_jobs ORDER BY updated DESC LIMIT 20')]
     return {'counts':counts,'recent':recent}

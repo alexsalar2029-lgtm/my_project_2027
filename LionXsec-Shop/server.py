@@ -499,7 +499,8 @@ class Handler(BaseHTTPRequestHandler):
                      "/admin.js": "admin.js", "/shared.js": "shared.js", "/styles.css": "styles.css",
                      "/theme.css": "theme.css", "/favicon.svg": "favicon.svg",
                      "/social.js": "social.js", "/social-admin.js": "social-admin.js"}
-            files.update({'/assistant-ui.js':'assistant-ui.js','/assistant-feed.js':'assistant-feed.js'})
+            files.update({'/assistant-ui.js':'assistant-ui.js','/assistant-feed.js':'assistant-feed.js',
+                          '/assistant-status.js':'assistant-status.js'})
             assets = {f"{brand}.svg" for brand in BRANDS if brand != "generic"} | {"lion-mark.svg", "lion-hero.png", "lion-logo.png"}
             files.update({"/assets/"+asset: "assets/"+asset for asset in assets})
             if path not in files:
@@ -639,6 +640,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send(store.save_social_links(data))
                 if path == '/api/admin/assistant/reprocess' and method == 'POST':
                     return self.send({'queued': automation.requeue_published(store)})
+                if path == '/api/admin/assistant/retry' and method == 'POST':
+                    return self.send({'queued': automation.requeue_failed(store)})
                 if path == '/api/admin/assistant' and method == 'PUT':
                     try:
                         return self.send(save_config(store,data))

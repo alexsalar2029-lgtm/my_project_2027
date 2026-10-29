@@ -9,7 +9,8 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from automation import initialize, ingest, process_one, queue_message, requeue_published
+from automation import initialize, ingest, process_one, queue_message, requeue_published, requeue_failed
+from model_output import ModelOutputError, correction_instructions, output_schema, parse_output
 
 DEFAULT = {'enabled':False,'channel':'','model':'gpt-4.1-mini','provider':'openai','bot_token':'','api_key':''}
 DEFAULT.update(source='bot',telegram_api_id='',telegram_api_hash='')
@@ -45,7 +46,8 @@ The summary explains WHAT is offered and its stated benefit in 1-2 clear sentenc
 The body adds distinct details in short paragraphs: the offer, explicitly stated
 features/usage, and stated purchase conditions (duration, region, devices, minimum
 quantity, warranty, delivery and price). Omit missing facts and empty headings.
-Never repeat the summary as the entire body. Use specific source facts instead of
+Prefer details that add to the summary. For a very short source, faithful overlap
+is acceptable; do not invent facts just to make the two fields different. Use specific source facts instead of
 filler like 'best quality', 'amazing service' or 'contact us for everything'. A short
 source needs concise copy, not invented specifications to reach a word count.
 For tutorial: name the topic and expected learning outcome, then explain only the
@@ -99,34 +101,44 @@ def http_json(url, payload, headers=None, timeout=80):
         raise RemoteError('connection_failed') from None
 
 
-class Model:
+class RepairableModel:
+    def repair(self, text, media, problem):
+        return self.analyze(text, media, correction=correction_instructions(problem))
+
+
+class Model(RepairableModel):
     def __init__(self, config, transport=None):
         self.config=config
         self.transport=transport or functools.partial(http_json,timeout=OPENAI_TIMEOUT)
 
-    def analyze(self, text, media=None):
+    def analyze(self, text, media=None, correction=''):
         content=[{'type':'text','text':json.dumps({'source_post':text},ensure_ascii=False)}]
         for image in media or []:
             content.append({'type':'image_url','image_url':{'url':image,'detail':'auto'}})
+        messages = [{'role':'system','content':SYSTEM}, {'role':'user','content':content}]
+        if correction:
+            messages.append({'role':'system','content':correction})
         result = self.transport('https://api.openai.com/v1/chat/completions',
             {'model':self.config['model'], 'response_format':{'type':'json_object'},
              'max_completion_tokens':16000,
-             'messages':[{'role':'system','content':SYSTEM},
-                         {'role':'user','content':content}]},
+             'messages':messages},
             {'Authorization':'Bearer '+self.config['api_key']})
         try:
-            return json.loads(result['choices'][0]['message']['content'])
-        except (KeyError,IndexError,TypeError,json.JSONDecodeError):
-            raise ValueError('invalid_model_response') from None
+            choice = result['choices'][0]
+            raw = choice['message'].get('content')
+            truncated = choice.get('finish_reason') == 'length'
+        except (KeyError,IndexError,TypeError,AttributeError):
+            raise ModelOutputError('model_output_empty') from None
+        return parse_output(raw, truncated=truncated)
 
 
-class OllamaModel:
+class OllamaModel(RepairableModel):
     """Free local vision analysis through Ollama's loopback REST API."""
     def __init__(self, config, transport=None):
         self.config=config
         self.transport=transport or functools.partial(http_json,timeout=OLLAMA_TIMEOUT)
 
-    def analyze(self, text, media=None):
+    def analyze(self, text, media=None, correction=''):
         images=[]
         for value in media or []:
             if isinstance(value,str) and ';base64,' in value:
@@ -134,14 +146,24 @@ class OllamaModel:
         user={'role':'user','content':json.dumps({'source_post':text},ensure_ascii=False)}
         if images:
             user['images']=images
+        compact = ('Keep the complete four-language answer within the output budget. '
+                   'For each language use a single-line title (at most 180 characters), '
+                   'a summary (at most 350 characters) and 1-3 concise body paragraphs '
+                   '(at most 1200 characters total). Return every required language. '
+                   'Keep only source-supported details; never pad short posts.')
+        messages=[{'role':'system','content':SYSTEM+'\n'+compact},user]
+        if correction:
+            messages.append({'role':'system','content':correction})
         result=self.transport('http://127.0.0.1:11434/api/chat',{
-            'model':self.config['model'],'stream':False,'format':'json','think':False,
-            'messages':[{'role':'system','content':SYSTEM},user],
-            'options':{'temperature':0.1,'num_ctx':8192,'num_predict':4096}})
+            'model':self.config['model'],'stream':False,'format':output_schema(),'think':False,
+            'messages':messages,
+            'options':{'temperature':0.1,'num_ctx':16384,'num_predict':4096}})
         try:
-            return json.loads(result['message']['content'])
-        except (KeyError,TypeError,json.JSONDecodeError):
-            raise ValueError('invalid_model_response') from None
+            raw = result['message'].get('content')
+            truncated = result.get('done_reason') == 'length' or result.get('done') is False
+        except (KeyError,TypeError,AttributeError):
+            raise ModelOutputError('model_output_empty') from None
+        return parse_output(raw, truncated=truncated)
 
 
 def configured_model(config):
@@ -341,6 +363,5 @@ if __name__ == '__main__':
         count = requeue_published(store)
         print(f'{count} published posts queued for rewriting. Existing posts stay visible until replacement.')
     else:
-        with store.db() as db:
-            db.execute("UPDATE assistant_jobs SET status='retry',attempts=0,retry_at=0,error='' WHERE status IN ('failed','retry')")
-        print('Retrying and failed jobs queued for another attempt.')
+        count = requeue_failed(store)
+        print(f'{count} retrying/failed jobs queued. Published and ignored posts are unchanged.')

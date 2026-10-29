@@ -1,5 +1,7 @@
 # Telegram publishing fixes and lion logo — v1.9.1
 
+This is the v1.9.1 validation record. The subsequent model validation/retry behavior and current test results are documented in [MODEL_RECOVERY_VALIDATION.md](MODEL_RECOVERY_VALIDATION.md).
+
 The source was taken from the supplied `LionXsec-Shop.rar`. Source files are now available in this directory as well as in the distribution ZIP. No production database, Telegram session, uploaded media or credentials were supplied or included in the release.
 
 ## Changes

@@ -26,9 +26,16 @@ def run():
                     title={'fa':'اشتراک Netflix Premium یک‌ماهه','en':'Netflix Premium — 1 month',
                            'ar':'اشتراك Netflix Premium لشهر واحد','es':'Netflix Premium — 1 mes'} if index==1 else local('نمونه '+kind)
                     return {'kind':kind,'title':title,'summary':local('توضیحات آزمایشی'),
-                            'body':local('<img src=x onerror=alert(1)> متن توضیحات'),
+                            'body':local('توضیحات آزمایشی' if index==4 else '<img src=x onerror=alert(1)> متن توضیحات'),
                             'price':{'amount':'12.50','currency':'USDT'}}
             process_one(store,Model())
+        for index in (26,27):
+            ingest(store,[{'update_id':index,'channel_post':{'message_id':index,
+                'chat':{'type':'channel','id':-1001234567890,'username':'my_channel'},
+                'text':'Spotify Premium 1 month'}}],'-1001234567890','local-test')
+        with store.db() as db:
+            db.execute("UPDATE assistant_jobs SET status='retry',error='model_summary_es_missing',attempts=1,retry_at=9999999999 WHERE message=26")
+            db.execute("UPDATE assistant_jobs SET status='failed',error='model_output_truncated',attempts=5 WHERE message=27")
         app=App(('127.0.0.1',0),store)
         thread=threading.Thread(target=app.serve_forever,daemon=True);thread.start()
         runner=Runner(store);runner.start()
@@ -49,6 +56,8 @@ def run():
                 page.locator('#assistant-sale summary').first.click()
                 expect(page.locator('#assistant-sale .assistant-body').first).to_contain_text('<img')
                 expect(page.locator('#assistant-sale .assistant-body img')).to_have_count(0)
+                expect(page.locator('#assistant-sale [data-brand=generic] details')).to_have_count(0)
+                expect(page.locator('#assistant-sale [data-brand=generic] .assistant-summary')).to_have_text('توضیحات آزمایشی')
                 for logo in page.locator('.assistant-logo img').all():
                     expect(logo).to_have_attribute('src','/assets/lion-logo.png')
                     expect(logo).to_have_css('filter','none')
@@ -78,6 +87,7 @@ def run():
                 page.goto(origin+'/admin')
                 assert page.request.get(origin+'/api/admin/assistant').status==401
                 assert page.request.post(origin+'/api/admin/assistant/reprocess',data={}).status==401
+                assert page.request.post(origin+'/api/admin/assistant/retry',data={}).status==401
                 page.locator('[name=password]').fill(password)
                 page.locator('#login-form [type=submit]').click()
                 page.locator('[data-tab=assistant]').click()
@@ -85,13 +95,27 @@ def run():
                 expect(page.locator('[name=enabled]')).not_to_be_checked()
                 assert page.request.put(origin+'/api/admin/assistant',data={'enabled':False}).status==403
                 assert page.request.post(origin+'/api/admin/assistant/reprocess',data={}).status==403
+                assert page.request.post(origin+'/api/admin/assistant/retry',data={}).status==403
+                expect(page.locator('#assistant-recent')).to_contain_text('خلاصه (اسپانیایی): وجود ندارد')
+                expect(page.locator('#assistant-recent')).to_contain_text('پاسخ مدل به سقف خروجی رسید')
+                for language in ('en','ar','es','fa'):
+                    page.locator('.language').select_option(language)
+                    expect(page.locator('#assistant-retry')).to_be_visible()
+                    assert 'model_summary_es_missing' not in page.locator('#assistant-recent').inner_text()
+                with page.expect_response('**/api/admin/assistant/retry') as retry:
+                    page.locator('#assistant-retry').click()
+                assert retry.value.status==200
+                assert retry.value.json()['queued']==2
+                expect(page.locator('#assistant-retry-result')).to_contain_text('2')
+                expect(page.locator('#assistant-recent')).not_to_contain_text('خلاصه (اسپانیایی)')
+                assert len(page.request.get(origin+'/api/assistant/posts').json()['posts'])==4
                 with page.expect_response('**/api/admin/assistant/reprocess') as rewritten:
                     page.locator('#assistant-reprocess').click()
                 assert rewritten.value.status==200
                 assert rewritten.value.json()['queued']==4
                 expect(page.locator('#assistant-reprocess-result')).to_contain_text('4')
                 assert len(page.request.get(origin+'/api/assistant/posts').json()['posts'])==4
-                assert page.request.get(origin+'/api/admin/assistant').json()['counts']=={'pending':4}
+                assert page.request.get(origin+'/api/admin/assistant').json()['counts']=={'pending':6}
                 page.locator('[name=channel]').fill('@my_channel')
                 page.locator('[name=bot_token]').fill('LOCAL_TEST_BOT_SENTINEL')
                 page.locator('[name=api_key]').fill('LOCAL_TEST_AI_SENTINEL')
@@ -127,7 +151,7 @@ def run():
                 assert not errors,errors
                 assert not external,external
                 browser.close()
-                print('PASS: real local server/browser; uniform lion logos, header and favicon; public/private source vs order contact; legacy contact refresh; four languages/mobile; escaped AI text; authenticated/CSRF-protected rewrite preserving current posts; admin settings; secret redaction; zero external calls. Model/Telegram responses simulated.')
+                print('PASS: real local server/browser; lion logos and correct contact; four languages/mobile; precise translated model errors; authenticated/CSRF-protected retry and rewrite preserving posts; admin settings; secret redaction; zero external calls. Model/Telegram responses simulated.')
         finally:
             runner.stop.set();runner.thread.join(timeout=4)
             app.shutdown();app.server_close();thread.join()

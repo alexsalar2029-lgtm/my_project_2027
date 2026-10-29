@@ -65,7 +65,8 @@ class AssistantTests(unittest.TestCase):
         def transport(url,payload,headers=None):
             self.assertEqual(url,'http://127.0.0.1:11434/api/chat')
             self.assertFalse(payload['stream'])
-            self.assertEqual(payload['format'],'json')
+            self.assertEqual(payload['format']['type'],'object')
+            self.assertEqual(payload['format']['properties']['title']['required'],['fa','en','ar','es'])
             self.assertEqual(payload['messages'][1]['images'],['/9j/test'])
             return {'message':{'content':json.dumps(result())}}
         value=OllamaModel({'model':'qwen3-vl:4b'},transport).analyze('Offer 12.50 USDT',[image])
@@ -245,12 +246,12 @@ class AssistantTests(unittest.TestCase):
         self.assertEqual(post['order_url'],'https://t.me/LionXSec')
         self.assertEqual(reopened.catalog()['settings']['social_links']['youtube'],'https://www.youtube.com/@custom')
 
-    def test_generic_titles_and_repeated_descriptions_are_retried_before_publication(self):
+    def test_generic_titles_are_retried_before_publication(self):
         self.enqueue(update())
         for title in ('پیشنهاد ویژه','Special offer','offer.mp4','nueva publicación'):
             with self.subTest(title=title),self.assertRaises(ValueError):
                 validate(result(title=title),'A subscription')
-        weak={**result(), 'body':translated('Source-based summary')}
+        weak=result(title='Special offer')
         process_one(self.store,FakeModel(weak))
         self.assertEqual(public_posts(self.store),[])
         self.assertEqual(status(self.store)['counts'],{'retry':1})

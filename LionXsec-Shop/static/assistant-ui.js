@@ -1,4 +1,5 @@
 import {api,esc,lang} from './shared.js';
+import {assistantStates,assistantError} from './assistant-status.js';
 export const assistantLabel=()=>({fa:'دستیار تلگرام',en:'Telegram assistant',ar:'مساعد تيليجرام',es:'Asistente Telegram'}[lang]);
 const labels=()=>({
  fa:{help:'کانال تحت مدیریت خود را وارد کنید و ربات اختصاصی را به آن اضافه کنید. پس از فعال‌سازی، دریافت، تحلیل و انتشار خودکار است. فیلدهای دارای ✓ را خالی بگذارید تا مقدار ذخیره‌شده حفظ شود.',channel:'کانال (@channel، ‎-100… یا لینک دعوت خصوصی در حالت حساب)',bot:'توکن ربات تلگرام',key:'کلید API OpenAI',model:'مدل OpenAI',enable:'فعال‌سازی انتشار خودکار',save:'ذخیره تنظیمات',saved:'ذخیره شد؛ دستیار در اجرای عادی سایت خودکار شروع می‌شود.',status:'وضعیت پردازش',recent:'آخرین پست‌ها',placeholder:'فقط برای جایگزینی مقدار جدید وارد کنید',error:'تنظیمات معتبر نیست.',privacy:'کلیدها فقط روی دستگاه میزبان در پوشه data ذخیره می‌شوند و در پاسخ API نمایش داده نمی‌شوند. متن و تصویر پیش‌نمایش رسانه برای تحلیل به OpenAI ارسال می‌شود و API هزینه دارد.'},
@@ -8,12 +9,33 @@ const labels=()=>({
 }[lang]);
 export async function renderAssistant(container,mutate){
  const result=await api('/api/admin/assistant'),c=result.config,l=labels();
- container.innerHTML=`<form id="assistant-form" class="panel settings-panel"><h2>${esc(assistantLabel())}</h2><p class="notice">${esc(l.help)}</p><p class="small muted">${esc(l.privacy)}</p><label class="field">${esc(l.channel)}<input name="channel" dir="ltr" value="${esc(c.channel)}" maxlength="40" placeholder="@your_channel"></label><label class="field">${esc(l.bot)} · ${c.bot_token_set?'✓':'—'}<input name="bot_token" type="password" dir="ltr" autocomplete="new-password" maxlength="500" placeholder="${esc(l.placeholder)}"></label><label class="field">${esc(l.key)} · ${c.api_key_set?'✓':'—'}<input name="api_key" type="password" dir="ltr" autocomplete="new-password" maxlength="500" placeholder="${esc(l.placeholder)}"></label><label class="field">${esc(l.model)}<input name="model" dir="ltr" value="${esc(c.model)}" maxlength="100"></label><label class="check-field"><input type="checkbox" name="enabled" ${c.enabled?'checked':''}>${esc(l.enable)}</label><p class="form-error" id="assistant-error" role="alert" hidden></p><p id="assistant-saved" role="status"></p><button class="button primary" type="submit">${esc(l.save)}</button><h3>${esc(l.status)}</h3><p dir="ltr">${esc(result.runtime.state)} ${esc(result.runtime.code||'')}</p><pre dir="ltr">${esc(JSON.stringify(result.counts,null,2))}</pre><h3>${esc(l.recent)}</h3>${result.recent.map(r=>`<p dir="ltr">#${r.message} · ${esc(r.status)} · ${esc(r.error)}</p>`).join('')}</form>`;
- const states={fa:{disabled:'غیرفعال',running:'در حال دریافت',error:'خطای اتصال یا پردازش',not_started:'هنوز شروع نشده',pending:'در انتظار تحلیل',retry:'در انتظار تلاش مجدد',failed:'ناموفق',published:'منتشرشده',ignored:'نامرتبط'},en:{disabled:'Disabled',running:'Receiving',error:'Connection or processing error',not_started:'Not started',pending:'Pending',retry:'Retry scheduled',failed:'Failed',published:'Published',ignored:'Ignored'}};
- const names=states[lang]||states.en;
+ container.innerHTML=`<form id="assistant-form" class="panel settings-panel"><h2>${esc(assistantLabel())}</h2><p class="notice">${esc(l.help)}</p><p class="small muted">${esc(l.privacy)}</p><label class="field">${esc(l.channel)}<input name="channel" dir="ltr" value="${esc(c.channel)}" maxlength="40" placeholder="@your_channel"></label><label class="field">${esc(l.bot)} · ${c.bot_token_set?'✓':'—'}<input name="bot_token" type="password" dir="ltr" autocomplete="new-password" maxlength="500" placeholder="${esc(l.placeholder)}"></label><label class="field">${esc(l.key)} · ${c.api_key_set?'✓':'—'}<input name="api_key" type="password" dir="ltr" autocomplete="new-password" maxlength="500" placeholder="${esc(l.placeholder)}"></label><label class="field">${esc(l.model)}<input name="model" dir="ltr" value="${esc(c.model)}" maxlength="100"></label><label class="check-field"><input type="checkbox" name="enabled" ${c.enabled?'checked':''}>${esc(l.enable)}</label><p class="form-error" id="assistant-error" role="alert" hidden></p><p id="assistant-saved" role="status"></p><button class="button primary" type="submit">${esc(l.save)}</button><h3>${esc(l.status)}</h3><p dir="ltr">${esc(result.runtime.state)} ${esc(result.runtime.code||'')}</p><pre dir="ltr">${esc(JSON.stringify(result.counts,null,2))}</pre><h3>${esc(l.recent)}</h3><div id="assistant-recent"></div></form>`;
+ const names=assistantStates();
  container.querySelector('h3 + p').textContent=(names[result.runtime.state]||result.runtime.state)+(result.runtime.code?' · '+result.runtime.code:'');
  container.querySelector('pre').textContent=Object.entries(result.counts).map(([key,count])=>(names[key]||key)+': '+count).join('\n')||'—';
  const form=container.querySelector('form');
+ const recovery={
+  fa:{button:'تلاش دوباره موارد ناموفق',help:'فقط پست‌های ناموفق و در انتظار تلاش مجدد به صف برمی‌گردند. ابتدا تنظیمات مدل را ذخیره کنید؛ دستیار باید فعال باشد.',queued:'تعداد پست‌های آمادهٔ تلاش دوباره',attempts:'تلاش ناموفق',next:'تلاش بعدی'},
+  en:{button:'Retry failed posts',help:'Requeue failed posts and scheduled retries only. Save model settings first and enable the assistant to process them.',queued:'Posts queued for another attempt',attempts:'Failed attempts',next:'Next retry'},
+  ar:{button:'إعادة محاولة المنشورات الفاشلة',help:'تُعاد فقط المنشورات الفاشلة والمحاولات المجدولة. احفظ إعدادات النموذج أولًا وفعّل المساعد.',queued:'المنشورات الجاهزة لإعادة المحاولة',attempts:'المحاولات الفاشلة',next:'المحاولة التالية'},
+  es:{button:'Reintentar publicaciones fallidas',help:'Reintenta solo los fallos y reintentos programados. Guarda la configuración del modelo y activa el asistente.',queued:'Publicaciones listas para reintentar',attempts:'Intentos fallidos',next:'Próximo intento'}
+ }[lang];
+ const renderRecent=state=>{
+  form.querySelector('pre').textContent=Object.entries(state.counts).map(([key,count])=>(names[key]||key)+': '+count).join('\n')||'—';
+  form.querySelector('#assistant-recent').innerHTML=state.recent.map(r=>`<p dir="auto">#${r.message} · ${esc(names[r.status]||r.status)}${r.error?' · '+esc(assistantError(r.error)):''}${r.attempts?' · '+esc(recovery.attempts)+': '+r.attempts:''}${r.status==='retry'&&r.retry_at?' · '+esc(recovery.next)+': '+esc(new Date(r.retry_at*1000).toLocaleTimeString(lang)):''}</p>`).join('');
+ };
+ renderRecent(result);
+ form.insertAdjacentHTML('beforeend',`<div class="assistant-rewrite"><p class="small muted">${esc(recovery.help)}</p><button type="button" class="button secondary" id="assistant-retry">${esc(recovery.button)}</button><p id="assistant-retry-result" role="status"></p></div>`);
+ form.querySelector('#assistant-retry').addEventListener('click',async e=>{
+  const button=e.currentTarget,feedback=form.querySelector('#assistant-retry-result');
+  button.disabled=true;
+  try{
+   const response=await mutate('/api/admin/assistant/retry','POST',{});
+   feedback.textContent=recovery.queued+': '+response.queued;
+   renderRecent(await api('/api/admin/assistant'));
+  }catch(err){feedback.textContent=err.message||l.error;}
+  finally{button.disabled=false;}
+ });
  const rewrite={
   fa:{button:'بازنویسی پست‌های منتشرشده',help:'عنوان و توضیحات پست‌های قبلی با تنظیمات فعلی هوش مصنوعی بازنویسی می‌شود. دستیار باید فعال باشد؛ متن فعلی تا آماده‌شدن جایگزین نمایش داده می‌شود.',queued:'تعداد پست‌های اضافه‌شده به صف بازنویسی'},
   en:{button:'Rewrite published posts',help:'Rewrite previous titles and descriptions using the current AI settings. Enable the assistant to process them; current posts stay visible until their replacements are ready.',queued:'Posts queued for rewriting'},
@@ -28,7 +50,7 @@ export async function renderAssistant(container,mutate){
    const response=await mutate('/api/admin/assistant/reprocess','POST',{});
    feedback.textContent=rewrite.queued+': '+response.queued;
    const state=await api('/api/admin/assistant');
-   form.querySelector('pre').textContent=Object.entries(state.counts).map(([key,count])=>(names[key]||key)+': '+count).join('\n')||'—';
+   renderRecent(state);
   }catch(err){feedback.textContent=err.message||l.error;}
   finally{button.disabled=false;}
  });

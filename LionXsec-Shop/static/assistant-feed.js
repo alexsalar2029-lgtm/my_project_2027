@@ -11,11 +11,13 @@ function postCard(p,l){
  const brand=brandFor({brand:p.brand,name:p.title});
  const source=telegramURL(p.source_url);
  const order=telegramURL(p.order_url)||DEFAULT_LINKS.telegram;
+ const summary=name(p.summary),body=name(p.body);
+ const hasDetails=body.trim().replace(/\s+/g,' ')!==summary.trim().replace(/\s+/g,' ');
  const sourceLink=source?`<a class="assistant-source" href="${esc(source)}" target="_blank" rel="noopener noreferrer">${esc(l.source)} ${icon('arrow')}</a>`:'';
  return `<article class="assistant-card" data-brand="${esc(brand)}" data-post-id="${esc(p.id)}">
   <div class="assistant-card-heading"><span class="assistant-logo">${brandLogo('generic','assistant-lion-logo')}</span><h3>${esc(name(p.title))}</h3></div>
-  <p class="assistant-summary">${esc(name(p.summary))}</p>
-  <details><summary>${esc(l.details)}</summary><p class="assistant-body">${esc(name(p.body))}</p></details>
+  <p class="assistant-summary">${esc(summary)}</p>
+  ${hasDetails?`<details><summary>${esc(l.details)}</summary><p class="assistant-body">${esc(body)}</p></details>`:''}
   ${p.kind==='sale'?`<strong class="assistant-price" dir="${p.price?'ltr':'auto'}">${p.price?esc(p.price.amount+' '+p.price.currency):esc(l.price)}</strong>`:''}
   <div class="assistant-actions">${p.kind==='sale'?`<a class="button primary assistant-order" href="${esc(order)}" target="_blank" rel="noopener noreferrer">${esc(l.buy)} ${icon('arrow')}</a>`:''}${sourceLink}</div>
  </article>`;
