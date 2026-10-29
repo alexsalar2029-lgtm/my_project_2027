@@ -1,0 +1,4 @@
+# Optional: only for account login/history; bot mode uses the standard library.
+Telethon==1.45.0
+# Bundled FFmpeg binary used to extract three temporary frames from Telegram videos.
+imageio-ffmpeg>=0.6.0,<0.7
