@@ -3,9 +3,10 @@ from pathlib import Path
 import secrets
 import tempfile
 import threading
+from unittest.mock import patch
 
 from playwright.sync_api import sync_playwright, expect
-from assistant import Runner
+from assistant import Runner, set_runtime
 from automation import ingest, process_one
 from server import App, Store
 
@@ -88,6 +89,7 @@ def run():
                 assert page.request.get(origin+'/api/admin/assistant').status==401
                 assert page.request.post(origin+'/api/admin/assistant/reprocess',data={}).status==401
                 assert page.request.post(origin+'/api/admin/assistant/retry',data={}).status==401
+                assert page.request.post(origin+'/api/admin/assistant/diagnostics',data={}).status==401
                 page.locator('[name=password]').fill(password)
                 page.locator('#login-form [type=submit]').click()
                 page.locator('[data-tab=assistant]').click()
@@ -96,6 +98,7 @@ def run():
                 assert page.request.put(origin+'/api/admin/assistant',data={'enabled':False}).status==403
                 assert page.request.post(origin+'/api/admin/assistant/reprocess',data={}).status==403
                 assert page.request.post(origin+'/api/admin/assistant/retry',data={}).status==403
+                assert page.request.post(origin+'/api/admin/assistant/diagnostics',data={}).status==403
                 expect(page.locator('#assistant-recent')).to_contain_text('خلاصه (اسپانیایی): وجود ندارد')
                 expect(page.locator('#assistant-recent')).to_contain_text('پاسخ مدل به سقف خروجی رسید')
                 for language in ('en','ar','es','fa'):
@@ -146,12 +149,44 @@ def run():
                 page.locator('[name=provider]').select_option('ollama')
                 expect(page.locator('[name=api_key]')).to_be_hidden()
                 expect(page.locator('[name=model]')).to_have_value('qwen3-vl:4b')
+                with page.expect_response('**/api/admin/assistant') as local_saved:
+                    page.locator('#assistant-form [type=submit]').click()
+                assert local_saved.value.status==200
+                report={'ok':False,'model':'qwen3-vl:4b','code':'ollama_connection_refused'}
+                with patch('server.check_ollama',return_value=report) as probe:
+                    for language in ('en','ar','es','fa'):
+                        page.locator('.language').select_option(language)
+                        with page.expect_response('**/api/admin/assistant/diagnostics') as checked:
+                            page.locator('#assistant-check').click()
+                        assert checked.value.status==200
+                        expect(page.locator('#assistant-check-result')).to_contain_text('ollama_connection_refused')
+                        assert len(page.locator('#assistant-check-result').inner_text())>len('qwen3-vl:4b · ollama_connection_refused')
+                    assert probe.call_count==4
+                    assert probe.call_args.args[0]['provider']=='ollama'
+                report={'ok':True,'model':'qwen3-vl:4b','code':'ollama_ready'}
+                with patch('server.check_ollama',return_value=report):
+                    with page.expect_response('**/api/admin/assistant/diagnostics'):
+                        page.locator('#assistant-check').click()
+                    expect(page.locator('#assistant-check-result')).to_contain_text('ollama_ready')
+                    expect(page.locator('#assistant-check-result')).to_contain_text('اجرای مدل و مصرف حافظه')
+                # A poll updates only status, retaining unsaved model/settings fields.
+                runner.stop.set();runner.thread.join(timeout=4)
+                page.locator('[name=model]').fill('qwen3-vl:2b')
+                set_runtime(store,'waiting_service','ollama_connection_closed',retry_at=1999999999)
+                expect(page.locator('#assistant-form h3 + p')).to_contain_text('صف منتظر آماده‌شدن سرویس',timeout=8000)
+                expect(page.locator('#assistant-form h3 + p')).to_contain_text('ollama_connection_closed')
+                expect(page.locator('[name=model]')).to_have_value('qwen3-vl:2b')
+                set_runtime(store,'processing',message=55)
+                expect(page.locator('#assistant-form h3 + p')).to_contain_text('در حال تحلیل پست · #55',timeout=8000)
+                expect(page.locator('[name=model]')).to_have_value('qwen3-vl:2b')
+                page.set_viewport_size({'width':390,'height':844})
+                assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
                 page.set_viewport_size({'width':1440,'height':1000})
                 page.screenshot(path=str(Path(__file__).resolve().parents[1]/'test-results/assistant-admin.png'),full_page=True)
                 assert not errors,errors
                 assert not external,external
                 browser.close()
-                print('PASS: real local server/browser; lion logos and correct contact; four languages/mobile; precise translated model errors; authenticated/CSRF-protected retry and rewrite preserving posts; admin settings; secret redaction; zero external calls. Model/Telegram responses simulated.')
+                print('PASS: real local server/browser; lion logos and contact; four languages/mobile; model/service errors; authenticated/CSRF-protected diagnostics, retry and rewrite; live queue/active-post updates preserve unsaved settings; secret redaction; zero external calls. Model/Telegram/Ollama responses simulated.')
         finally:
             runner.stop.set();runner.thread.join(timeout=4)
             app.shutdown();app.server_close();thread.join()

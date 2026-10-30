@@ -1,11 +1,16 @@
 import {lang} from './shared.js';
 
-export const assistantStates=()=>({
+export const assistantStates=()=>({...({
  fa:{disabled:'غیرفعال',running:'در حال دریافت',account_mode:'پردازش پیام‌های حساب تلگرام',error:'خطای اتصال یا پردازش',not_started:'هنوز شروع نشده',pending:'در انتظار تحلیل',retry:'در انتظار تلاش مجدد',failed:'ناموفق',published:'منتشرشده',ignored:'نامرتبط'},
  en:{disabled:'Disabled',running:'Receiving',account_mode:'Processing account messages',error:'Connection or processing error',not_started:'Not started',pending:'Pending',retry:'Retry scheduled',failed:'Failed',published:'Published',ignored:'Ignored'},
  ar:{disabled:'معطل',running:'جارٍ الاستلام',account_mode:'معالجة رسائل الحساب',error:'خطأ اتصال أو معالجة',not_started:'لم يبدأ بعد',pending:'بانتظار التحليل',retry:'إعادة المحاولة مجدولة',failed:'فشل',published:'منشور',ignored:'غير مرتبط'},
  es:{disabled:'Desactivado',running:'Recibiendo',account_mode:'Procesando mensajes de la cuenta',error:'Error de conexión o procesamiento',not_started:'No iniciado',pending:'Pendiente',retry:'Reintento programado',failed:'Fallido',published:'Publicado',ignored:'Ignorado'}
-}[lang]);
+}[lang]),...({
+ fa:{processing:'در حال تحلیل پست',waiting_service:'صف منتظر آماده‌شدن سرویس'},
+ en:{processing:'Analyzing post',waiting_service:'Queue waiting for the service'},
+ ar:{processing:'جارٍ تحليل المنشور',waiting_service:'القائمة تنتظر الخدمة'},
+ es:{processing:'Analizando publicación',waiting_service:'Cola esperando al servicio'}
+}[lang])});
 
 export function assistantError(code){
  if(!code)return '';
@@ -17,6 +22,27 @@ export function assistantError(code){
  }[lang];
  const field=/^model_(title|summary|body)(?:_(fa|en|ar|es))?_(object|missing|empty|not_text|too_long|generic)$/.exec(code);
  if(field)return labels[field[1]]+(field[2]?' ('+labels[field[2]]+')':'')+': '+labels[field[3]];
+ const service={
+  ollama_ready:{fa:'اتصال Ollama برقرار است و مدل ذخیره‌شده نصب است. اجرای مدل و مصرف حافظه با این بررسی آزمایش نمی‌شود.',en:'Ollama is reachable and the saved model is installed. Generation and memory use are not tested by this check.',ar:'Ollama متاح والنموذج المحفوظ مثبت. لا يختبر هذا الفحص التوليد أو استخدام الذاكرة.',es:'Ollama responde y el modelo guardado está instalado. Esta comprobación no prueba la generación ni el uso de memoria.'},
+  ollama_not_selected:{fa:'ابتدا روش Ollama و نام مدل را ذخیره کنید.',en:'Save Ollama as the provider and save the model name first.',ar:'احفظ Ollama كمزود واسم النموذج أولًا.',es:'Guarda primero Ollama como proveedor y el nombre del modelo.'},
+  ollama_model_missing:{fa:'مدل انتخاب‌شده در Ollama این دستگاه نصب نیست؛ نام را با ollama list بررسی کنید.',en:'The saved model is not installed in this Ollama instance. Check its name with ollama list.',ar:'النموذج المحفوظ غير مثبت في Ollama على هذا الجهاز. تحقق باستخدام ollama list.',es:'El modelo guardado no está instalado en esta instancia. Revisa el nombre con ollama list.'},
+  ollama_connection_refused:{fa:'Ollama روی دستگاه اجرای سایت پاسخ نمی‌دهد؛ برنامهٔ Ollama را روی همان دستگاه باز کنید.',en:'Ollama is not accepting connections on the shop host. Open Ollama on that same device.',ar:'لا يقبل Ollama الاتصالات على جهاز الموقع. شغّله على الجهاز نفسه.',es:'Ollama no acepta conexiones en el equipo del sitio. Abre Ollama en ese mismo equipo.'},
+  ollama_connection_timeout:{fa:'مهلت پاسخ Ollama تمام شد؛ بارگذاری مدل یا تحلیل ممکن است بیش از حد طول کشیده باشد.',en:'Ollama did not respond within the time limit. Model loading or analysis may be taking too long.',ar:'انتهت مهلة رد Ollama. قد يستغرق تحميل النموذج أو التحليل وقتًا طويلًا.',es:'Ollama agotó el tiempo de espera. La carga o el análisis pueden estar tardando demasiado.'},
+  ollama_connection_closed:{fa:'ارتباط با Ollama هنگام پاسخ قطع شد؛ وضعیت برنامه و گزارش اجرای مدل را بررسی کنید.',en:'Ollama closed the connection during the response. Check the app and model runtime log.',ar:'انقطع اتصال Ollama أثناء الرد. تحقق من التطبيق وسجل تشغيل النموذج.',es:'La conexión con Ollama se cerró durante la respuesta. Revisa la aplicación y su registro.'},
+  ollama_out_of_memory:{fa:'Ollama کمبود حافظه را گزارش کرد. مدل‌های دیگر را ببندید یا مدل کوچک‌تری انتخاب کنید.',en:'Ollama reported insufficient memory. Close other loaded models or select a smaller model.',ar:'أبلغ Ollama عن نقص الذاكرة. أغلق النماذج الأخرى أو اختر نموذجًا أصغر.',es:'Ollama indicó falta de memoria. Cierra otros modelos cargados o elige uno menor.'},
+  ollama_runner_stopped:{fa:'پردازش مدل در Ollama متوقف شد؛ گزارش اجرای Ollama را بررسی کنید.',en:'The Ollama model process stopped. Check the Ollama runtime log.',ar:'توقفت عملية النموذج. تحقق من سجل Ollama.',es:'El proceso del modelo se detuvo. Revisa el registro de Ollama.'},
+  ollama_service_response_invalid:{fa:'پاسخ سرویس محلی Ollama قابل‌خواندن نیست؛ این خطا با JSON متن تولیدشدهٔ مدل متفاوت است.',en:'The local Ollama service returned an unreadable response, before model output could be parsed.',ar:'أعادت خدمة Ollama المحلية ردًا غير قابل للقراءة قبل تحليل إخراج النموذج.',es:'El servicio local devolvió una respuesta ilegible antes de poder analizar la salida del modelo.'},
+  ollama_connection_failed:{fa:'ارتباط محلی با Ollama ناموفق بود؛ برنامه را روی دستگاه اجرای سایت بررسی کنید.',en:'The local connection to Ollama failed. Check Ollama on the shop host.',ar:'فشل الاتصال المحلي بـ Ollama. تحقّق منه على جهاز الموقع.',es:'Falló la conexión local con Ollama. Revísalo en el equipo del sitio.'},
+  connection_timeout:{fa:'مهلت پاسخ سرویس تمام شد.',en:'The service response timed out.',ar:'انتهت مهلة رد الخدمة.',es:'El servicio agotó el tiempo de espera.'},
+  connection_refused:{fa:'سرویس اتصال را نپذیرفت.',en:'The service refused the connection.',ar:'رفضت الخدمة الاتصال.',es:'El servicio rechazó la conexión.'},
+  connection_closed:{fa:'ارتباط با سرویس هنگام پاسخ قطع شد.',en:'The service connection closed during the response.',ar:'انقطع الاتصال أثناء الرد.',es:'La conexión se cerró durante la respuesta.'},
+  dns_failed:{fa:'نام میزبان سرویس پیدا نشد.',en:'The service hostname could not be resolved.',ar:'تعذر تحديد عنوان الخدمة.',es:'No se pudo resolver el nombre del servicio.'},
+  tls_failed:{fa:'برقراری اتصال امن با سرویس ناموفق بود.',en:'The secure connection to the service failed.',ar:'فشل الاتصال الآمن بالخدمة.',es:'Falló la conexión segura con el servicio.'},
+  service_response_invalid:{fa:'پاسخ دریافتی از سرویس قابل‌خواندن نیست.',en:'The service returned an unreadable response.',ar:'أعادت الخدمة ردًا غير قابل للقراءة.',es:'El servicio devolvió una respuesta ilegible.'}
+ };
+ if(service[code])return service[code][lang];
+ const http=/^(ollama_)?http_(\d{3})$/.exec(code);
+ if(http)return (http[1]?'Ollama · ':'')+({fa:'خطای سرویس',en:'Service error',ar:'خطأ الخدمة',es:'Error del servicio'}[lang])+' HTTP '+http[2];
  const errors={
   model_output_truncated:{fa:'پاسخ مدل به سقف خروجی رسید و کامل نشد.',en:'The model reached its output limit before finishing.',ar:'وصل النموذج إلى حد الإخراج قبل الإكمال.',es:'El modelo alcanzó el límite de salida antes de terminar.'},
   model_output_empty:{fa:'مدل پاسخ قابل‌خواندن برنگرداند.',en:'The model returned no readable content.',ar:'لم يُرجع النموذج محتوى قابلًا للقراءة.',es:'El modelo no devolvió contenido legible.'},

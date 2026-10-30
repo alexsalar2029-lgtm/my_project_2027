@@ -6,6 +6,7 @@ import time
 from decimal import Decimal, InvalidOperation
 from social import DEFAULT_LINKS, validate_links
 from model_output import ModelOutputError
+from service_transport import RemoteError
 
 LANGS = ('fa', 'en', 'ar', 'es')
 DIGITS = str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩', '01234567890123456789')
@@ -175,7 +176,13 @@ def validate(result, source):
     return item
 
 
-def process_one(store, model, max_attempts=5):
+def has_due_jobs(store):
+    with store.db() as db:
+        return db.execute("SELECT 1 FROM assistant_jobs WHERE status IN ('pending','retry') AND retry_at<=? LIMIT 1",
+                          (int(time.time()),)).fetchone() is not None
+
+
+def process_one(store, model, max_attempts=5, *, pause_on_service_error=False, on_start=None):
     """Model work outside a transaction; atomic publish with optimistic revision check."""
     with store.db() as db:
         job = db.execute("""SELECT * FROM assistant_jobs
@@ -184,6 +191,8 @@ def process_one(store, model, max_attempts=5):
             (int(time.time()),)).fetchone()
     if not job:
         return False
+    if on_start:
+        on_start(job['message'])
     try:
         media=json.loads(job['media']) if job['media'] else []
         try:
@@ -203,6 +212,9 @@ def process_one(store, model, max_attempts=5):
         with store.db() as db:
             db.execute('UPDATE assistant_jobs SET attempts=?,status=?,retry_at=?,error=? WHERE key=? AND digest=?',
                        (attempts,'failed' if attempts>=max_attempts else 'retry',int(time.time())+max(min(3600,30*2**attempts),min(3600,getattr(exc,'retry',0))),code,job['key'],job['digest']))
+        if pause_on_service_error and isinstance(exc, RemoteError) and exc.pause_queue:
+            # The runner waits once for the service, instead of immediately failing every job.
+            raise
         return True
     with store.db() as db:
         db.execute('BEGIN IMMEDIATE')

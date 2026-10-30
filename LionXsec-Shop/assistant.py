@@ -6,11 +6,10 @@ from pathlib import Path
 import re
 import threading
 import time
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
-from automation import initialize, ingest, process_one, queue_message, requeue_published, requeue_failed
+from automation import initialize, ingest, process_one, queue_message, requeue_published, requeue_failed, has_due_jobs
 from model_output import ModelOutputError, correction_instructions, output_schema, parse_output
+from service_transport import RemoteError, http_json, ollama_json
 
 DEFAULT = {'enabled':False,'channel':'','model':'gpt-4.1-mini','provider':'openai','bot_token':'','api_key':''}
 DEFAULT.update(source='bot',telegram_api_id='',telegram_api_hash='')
@@ -77,30 +76,6 @@ followed by currency; otherwise return null. Use clear paragraphs that keep the
 source's own claims.'''
 
 
-class RemoteError(Exception):
-    def __init__(self, code, retry=30):
-        self.code, self.retry = code, retry
-
-
-def http_json(url, payload, headers=None, timeout=80):
-    try:
-        request = Request(url, json.dumps(payload).encode(),
-                          {'Content-Type':'application/json', **(headers or {})})
-        with urlopen(request, timeout=timeout) as response:
-            raw = response.read(32*1024*1024+1)
-        if len(raw)>32*1024*1024:
-            raise RemoteError('response_too_large')
-        return json.loads(raw)
-    except HTTPError as error:
-        try:
-            wait = min(3600,max(5,int(error.headers.get('Retry-After','30'))))
-        except ValueError:
-            wait = 30
-        raise RemoteError('http_'+str(error.code),wait) from None
-    except (URLError,TimeoutError,OSError,json.JSONDecodeError):
-        raise RemoteError('connection_failed') from None
-
-
 class RepairableModel:
     def repair(self, text, media, problem):
         return self.analyze(text, media, correction=correction_instructions(problem))
@@ -136,7 +111,7 @@ class OllamaModel(RepairableModel):
     """Free local vision analysis through Ollama's loopback REST API."""
     def __init__(self, config, transport=None):
         self.config=config
-        self.transport=transport or functools.partial(http_json,timeout=OLLAMA_TIMEOUT)
+        self.transport=transport or functools.partial(http_json,timeout=OLLAMA_TIMEOUT,local=True)
 
     def analyze(self, text, media=None, correction=''):
         images=[]
@@ -168,6 +143,27 @@ class OllamaModel(RepairableModel):
 
 def configured_model(config):
     return OllamaModel(config) if config.get('provider')=='ollama' else Model(config)
+
+
+def check_ollama(config, transport=None):
+    """Check the shop host's local service and installed model, without inference."""
+    report = {'ok':False, 'model':config.get('model', ''), 'checked_at':int(time.time())}
+    if config.get('provider') != 'ollama':
+        return report | {'code':'ollama_not_selected'}
+    try:
+        value = (transport or ollama_json)('/api/tags')
+        models = value.get('models') if isinstance(value, dict) else None
+        if not isinstance(models, list):
+            raise RemoteError('ollama_service_response_invalid')
+        names = {item.get('name') for item in models
+                 if isinstance(item, dict) and isinstance(item.get('name'), str)}
+        model = config.get('model', '')
+        canonical = model if ':' in model.rsplit('/', 1)[-1] else model + ':latest'
+        if not {model, canonical} & names:
+            return report | {'code':'ollama_model_missing'}
+        return report | {'ok':True, 'code':'ollama_ready'}
+    except RemoteError as error:
+        return report | {'code':error.code}
 
 
 class Telegram:
@@ -263,10 +259,10 @@ def save_config(store, data):
     return read_config(store,public=True)
 
 
-def set_runtime(store, state, code=''):
+def set_runtime(store, state, code='', **details):
     with store.db() as db:
         db.execute('INSERT OR REPLACE INTO assistant_state VALUES(?,?)',
-                   ('runtime',json.dumps({'state':state,'code':code,'updated':int(time.time())})))
+                   ('runtime',json.dumps({'state':state,'code':code,'updated':int(time.time()),**details})))
 
 
 def import_history(store, path, configured):
@@ -298,6 +294,19 @@ class Runner:
         initialize(self.store)
         self.thread.start()
 
+    def process_queue(self, config):
+        model = configured_model(config)
+        idle = 'account_mode' if config['source'] == 'account' else 'running'
+        while not self.stop.is_set() and read_config(self.store) == config and has_due_jobs(self.store):
+            if config.get('provider') == 'ollama':
+                health = check_ollama(config)
+                if not health['ok']:
+                    # Do not spend every post's retry budget while the local service is down.
+                    raise RemoteError(health['code'], 60, pause_queue=True)
+            process_one(self.store, model, pause_on_service_error=True,
+                        on_start=lambda mid: set_runtime(self.store, 'processing', message=mid))
+            set_runtime(self.store, idle)
+
     def run(self):
         verified = None
         while not self.stop.is_set():
@@ -309,9 +318,7 @@ class Runner:
                     continue
                 if config['source'] == 'account':
                     set_runtime(self.store,'account_mode')
-                    while not self.stop.is_set() and read_config(self.store) == config:
-                        if not process_one(self.store,configured_model(config)):
-                            break
+                    self.process_queue(config)
                     self.stop.wait(3)
                     continue
                 telegram = Telegram(config['bot_token'])
@@ -332,13 +339,13 @@ class Runner:
                     'allowed_updates':['channel_post','edited_channel_post'],'limit':100})
                 ingest(self.store,updates,config['channel'],key)
                 set_runtime(self.store,'running')
-                while not self.stop.is_set() and read_config(self.store) == config:
-                    if not process_one(self.store,configured_model(config)):
-                        break
+                self.process_queue(config)
                 self.stop.wait(1)
             except RemoteError as error:
-                set_runtime(self.store,'error',error.code)
-                self.stop.wait(max(5,error.retry))
+                delay = max(5, min(3600, error.retry))
+                set_runtime(self.store,'waiting_service' if error.pause_queue else 'error',error.code,
+                            retry_at=int(time.time()) + delay)
+                self.stop.wait(delay)
             except Exception:
                 set_runtime(self.store,'error','local_processing_error')
                 self.stop.wait(30)
@@ -348,13 +355,17 @@ if __name__ == '__main__':
     import argparse
     from server import Store
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command',choices=['import-history','retry-failed','reprocess-published'])
+    parser.add_argument('command',choices=['import-history','retry-failed','reprocess-published','check-ollama'])
     parser.add_argument('file',nargs='?')
     parser.add_argument('--data-dir',type=Path,default=Path(__file__).resolve().parent/'data')
     args = parser.parse_args()
     store = Store(args.data_dir/'shop.sqlite3')
     initialize(store)
-    if args.command == 'import-history':
+    if args.command == 'check-ollama':
+        report = check_ollama(read_config(store))
+        print(json.dumps(report, ensure_ascii=True))
+        raise SystemExit(0 if report['ok'] else 1)
+    elif args.command == 'import-history':
         if not args.file:
             parser.error('Export JSON file is required')
         import_history(store,args.file,read_config(store)['channel'])

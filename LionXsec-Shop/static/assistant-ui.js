@@ -21,6 +21,10 @@ export async function renderAssistant(container,mutate){
   es:{button:'Reintentar publicaciones fallidas',help:'Reintenta solo los fallos y reintentos programados. Guarda la configuración del modelo y activa el asistente.',queued:'Publicaciones listas para reintentar',attempts:'Intentos fallidos',next:'Próximo intento'}
  }[lang];
  const renderRecent=state=>{
+  if(state.runtime){
+   const r=state.runtime;
+   form.querySelector('h3 + p').textContent=(names[r.state]||r.state)+(r.message?' · #'+r.message:'')+(r.code?' · '+assistantError(r.code)+' ('+r.code+')':'')+(r.retry_at?' · '+recovery.next+': '+new Date(r.retry_at*1000).toLocaleTimeString(lang):'');
+  }
   form.querySelector('pre').textContent=Object.entries(state.counts).map(([key,count])=>(names[key]||key)+': '+count).join('\n')||'—';
   form.querySelector('#assistant-recent').innerHTML=state.recent.map(r=>`<p dir="auto">#${r.message} · ${esc(names[r.status]||r.status)}${r.error?' · '+esc(assistantError(r.error)):''}${r.attempts?' · '+esc(recovery.attempts)+': '+r.attempts:''}${r.status==='retry'&&r.retry_at?' · '+esc(recovery.next)+': '+esc(new Date(r.retry_at*1000).toLocaleTimeString(lang)):''}</p>`).join('');
  };
@@ -61,8 +65,24 @@ export async function renderAssistant(container,mutate){
  form.querySelector('#account-fields').insertAdjacentHTML('afterend',`<label class="field">${esc(a.provider)}<select name="provider"><option value="openai">${esc(a.openai)}</option><option value="ollama">${esc(a.ollama)}</option></select></label>`);
  form.elements.source.value=c.source||'bot';
  form.elements.provider.value=c.provider||'openai';
+ const diagnostics={
+  fa:{button:'بررسی اتصال Ollama',help:'تنظیمات را اول ذخیره کنید. این بررسی روی دستگاه اجرای سایت انجام می‌شود و وجود مدل را بررسی می‌کند؛ مدل را اجرا نمی‌کند.',checking:'در حال بررسی…'},
+  en:{button:'Check Ollama connection',help:'Save settings first. This checks the service and installed model on the shop host; it does not run the model.',checking:'Checking…'},
+  ar:{button:'فحص اتصال Ollama',help:'احفظ الإعدادات أولًا. يُفحص الاتصال ووجود النموذج على جهاز الموقع دون تشغيل النموذج.',checking:'جارٍ الفحص…'},
+  es:{button:'Comprobar conexión con Ollama',help:'Guarda la configuración primero. Comprueba el servicio y el modelo instalado en el equipo del sitio, sin ejecutarlo.',checking:'Comprobando…'}
+ }[lang];
+ form.elements.provider.closest('label').insertAdjacentHTML('afterend',`<div id="assistant-diagnostics"><p class="small muted">${esc(diagnostics.help)}</p><button type="button" class="button secondary" id="assistant-check">${esc(diagnostics.button)}</button><p id="assistant-check-result" role="status"></p></div>`);
+ form.querySelector('#assistant-check').addEventListener('click',async e=>{
+  const button=e.currentTarget,feedback=form.querySelector('#assistant-check-result');
+  button.disabled=true;feedback.textContent=diagnostics.checking;
+  try{
+   const report=await mutate('/api/admin/assistant/diagnostics','POST',{});
+   feedback.textContent=(report.model?report.model+' · ':'')+assistantError(report.code)+' ('+report.code+')';
+  }catch(err){feedback.textContent=err.message||l.error;}
+  finally{button.disabled=false;}
+ });
  const updateSource=()=>{const account=form.elements.source.value==='account';form.querySelector('#account-fields').hidden=!account;form.elements.bot_token.closest('label').hidden=account;form.querySelector(':scope > .notice').hidden=account;};
- const updateProvider=()=>{const local=form.elements.provider.value==='ollama';form.elements.api_key.closest('label').hidden=local;if(local&&form.elements.model.value==='gpt-4.1-mini')form.elements.model.value='qwen3-vl:4b';};
+ const updateProvider=()=>{const local=form.elements.provider.value==='ollama';form.elements.api_key.closest('label').hidden=local;form.querySelector('#assistant-diagnostics').hidden=!local;if(local&&form.elements.model.value==='gpt-4.1-mini')form.elements.model.value='qwen3-vl:4b';};
  form.elements.source.addEventListener('change',updateSource);updateSource();
  form.elements.provider.addEventListener('change',updateProvider);updateProvider();
  form.addEventListener('submit',async e=>{
@@ -70,4 +90,12 @@ export async function renderAssistant(container,mutate){
   try{await mutate('/api/admin/assistant','PUT',{source:f.get('source'),provider:f.get('provider'),telegram_api_id:f.get('telegram_api_id'),telegram_api_hash:f.get('telegram_api_hash'),channel:f.get('channel'),model:f.get('model'),bot_token:f.get('bot_token'),api_key:f.get('api_key'),enabled:f.get('enabled')==='on'});form.elements.bot_token.value='';form.elements.api_key.value='';form.elements.telegram_api_hash.value='';form.querySelector('#assistant-saved').textContent=l.saved;}
   catch(err){const details={invalid_assistant_channel:'لینک یا شناسه کانال معتبر نیست؛ برای لینک خصوصی روش حساب کاربری را انتخاب کنید.',invalid_assistant_model:'نام مدل OpenAI معتبر نیست.',invalid_telegram_api_id:'Telegram App API ID فقط باید عدد باشد.',invalid_telegram_api_hash:'Telegram API hash باید دقیقاً ۳۲ نویسه هگز باشد.',invalid_api_key:'کلید OpenAI دارای فاصله یا نویسه نامعتبر است.',invalid_bot_token:'توکن ربات معتبر نیست.',missing_channel:'کانال وارد نشده است.',missing_api_key:'کلید OpenAI ذخیره نشده است.',missing_bot_token:'توکن ربات ذخیره نشده است.',missing_telegram_api_id:'Telegram App API ID ذخیره نشده است.',missing_telegram_api_hash:'Telegram API hash ذخیره نشده است.'};error.textContent=details[err.code]||err.message||l.error;error.hidden=false;}finally{b.disabled=false;}
  });
+ // Refresh status without re-rendering the form or discarding unsaved settings.
+ const refresh=async()=>{
+  if(!form.isConnected)return;
+  try{if(!document.hidden){const state=await api('/api/admin/assistant');if(form.isConnected)renderRecent(state);}}
+  catch(err){if(err.code==='unauthorized')return;}
+  if(form.isConnected)setTimeout(refresh,5000);
+ };
+ setTimeout(refresh,5000);
 }
