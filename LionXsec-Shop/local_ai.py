@@ -31,9 +31,13 @@ def runtime_dir(root, backend):
 
 
 def verify_archive(path, expected):
+    digest = hashlib.sha256()
     with path.open('rb') as source:
-        digest = hashlib.file_digest(source, 'sha256').hexdigest()
-    if digest != expected:
+        # file_digest was added in Python 3.11. Keep the installer compatible
+        # with older Python versions without weakening the checksum check.
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    if digest.hexdigest() != expected:
         raise ValueError('download_checksum_mismatch: delete the ZIP and run setup again')
 
 
@@ -69,8 +73,17 @@ def install_runtime(root=ROOT, backend='vulkan'):
     cache = root / '.local-ai'
     cache.mkdir(parents=True, exist_ok=True)
     archive = cache / asset
+    part = archive.with_suffix('.part')
+    if not archive.exists() and part.exists():
+        # Recover a complete download left by an interrupted verification or
+        # rename. Incomplete/invalid data is discarded and downloaded again.
+        try:
+            verify_archive(part, checksum)
+        except ValueError:
+            part.unlink()
+        else:
+            part.replace(archive)
     if not archive.exists():
-        part = archive.with_suffix('.part')
         print('Downloading official llama.cpp ' + BUILD + ' (' + backend + ')...', flush=True)
         try:
             url = 'https://github.com/ggml-org/llama.cpp/releases/download/' + BUILD + '/' + asset
@@ -85,8 +98,11 @@ def install_runtime(root=ROOT, backend='vulkan'):
                         print(str(size // (1024 * 1024)) + ' MiB downloaded', flush=True)
             verify_archive(part, checksum)
             part.replace(archive)
-        finally:
+        except ValueError:
+            # Never extract a mismatched or oversized download. Other failures
+            # retain the part for verification on the next setup attempt.
             part.unlink(missing_ok=True)
+            raise
     verify_archive(archive, checksum)
     with tempfile.TemporaryDirectory(prefix='install-', dir=cache) as temporary:
         staged = Path(temporary) / 'runtime'

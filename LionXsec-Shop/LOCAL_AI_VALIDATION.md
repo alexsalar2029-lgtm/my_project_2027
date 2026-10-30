@@ -1,4 +1,20 @@
-# Local Gemma integration validation — v1.10.0
+# Local Gemma integration validation — v1.10.1
+
+## Installer compatibility hotfix (2026-10-30)
+
+The installer used `hashlib.file_digest`, which is unavailable before Python 3.11. It now streams 1 MiB chunks into `hashlib.sha256`; pinned digests and rejection of corrupt downloads are unchanged. A completed `.part` download is retained after an unexpected verification/rename failure and verified again before reuse. Incomplete parts are discarded and downloaded again; this is not byte-range download resumption.
+
+- Full regression suite: **137 tests passed on Python 3.10.22 and Python 3.12.14**.
+- The 23 local-AI tests passed under a real Python 3.10 interpreter with no `hashlib.file_digest`. Four new regressions cover that absent API, a complete retained download, a partial download, and interruption of verification followed by an offline reuse attempt.
+- The existing real `asyncio.wait_for` deadline test now expects `asyncio.TimeoutError`, which is distinct from the builtin timeout on Python 3.10. The Telegram production code already handles both; no media behavior was changed. The 23 media tests also passed again on Python 3.12 after this portable assertion change.
+- The actual official b11960 Vulkan and CPU ZIPs were checked with the new streaming implementation on Python 3.10. The actual Vulkan archive was recovered from a complete `.part` and extracted in a temporary path containing spaces, without a download. The Windows platform guard was mocked for extraction; Windows executables were not run.
+- Python compilation and `git diff --check` passed. Frontend code is unchanged; the browser validation below belongs to v1.10.0 and was not repeated for this installer fix.
+
+The small patch contains only `local_ai.py` plus its Persian update guide. Existing v1.10.0 installations do not need to replace their database, Telegram session, settings, or downloaded models. The old installer's unconditional cleanup may already have deleted the user's failed download; it cannot be recovered by this patch and will need to download once more.
+
+No real Gemma inference or AMD GPU test was performed for this hotfix. The runtime artifact hashes and remaining model limitations below are unchanged.
+
+## Original v1.10.0 validation
 
 Validated on 2026-10-30 in the managed Linux development environment. This report distinguishes application tests from real model inference.
 

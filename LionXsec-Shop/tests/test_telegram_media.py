@@ -70,7 +70,8 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
             paths.append(path)
             await asyncio.Event().wait()
         with patch('telegram_media.VIDEO_TIMEOUT',0.01):
-            with self.assertRaises(TimeoutError):
+            # Before Python 3.11, asyncio's timeout is distinct from the builtin.
+            with self.assertRaises(asyncio.TimeoutError):
                 await video_frames(SimpleNamespace(download_media=download),video())
         self.assertTrue(paths)
         self.assertFalse(paths[0].parent.exists())

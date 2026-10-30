@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
@@ -206,6 +207,83 @@ class MigrationAndQueueTests(unittest.TestCase):
 
 
 class InstallerTests(unittest.TestCase):
+    def archive_fixture(self):
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, 'w') as output:
+            # Exercise hashing across multiple reads, including a final short read.
+            output.writestr('llama-server.exe', b'fixture' * 160_000)
+            output.writestr('llama.dll', b'fixture')
+            output.writestr('ggml-base.dll', b'fixture')
+        data = stream.getvalue()
+        return data, hashlib.sha256(data).hexdigest()
+
+    def test_download_installs_when_hashlib_has_no_file_digest(self):
+        data, checksum = self.archive_fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.dict(ASSETS, {'vulkan':(ASSETS['vulkan'][0],checksum)}), \
+                    patch('local_ai.platform.system', return_value='Windows'), \
+                    patch('local_ai.platform.machine', return_value='AMD64'), \
+                    patch('local_ai.hashlib', SimpleNamespace(sha256=hashlib.sha256)), \
+                    patch('local_ai.urlopen', return_value=io.BytesIO(data)):
+                runtime = install_runtime(root)
+            self.assertTrue((runtime / 'llama-server.exe').is_file())
+            self.assertEqual((root / '.local-ai' / ASSETS['vulkan'][0]).read_bytes(), data)
+
+    def test_complete_part_is_verified_and_reused_without_downloading(self):
+        data, checksum = self.archive_fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / '.local-ai'
+            cache.mkdir()
+            archive = cache / ASSETS['vulkan'][0]
+            archive.with_suffix('.part').write_bytes(data)
+            with patch.dict(ASSETS, {'vulkan':(archive.name,checksum)}), \
+                    patch('local_ai.platform.system', return_value='Windows'), \
+                    patch('local_ai.platform.machine', return_value='AMD64'), \
+                    patch('local_ai.urlopen') as network:
+                runtime = install_runtime(root)
+            network.assert_not_called()
+            self.assertTrue((runtime / 'llama-server.exe').is_file())
+            self.assertEqual(archive.read_bytes(), data)
+            self.assertFalse(archive.with_suffix('.part').exists())
+
+    def test_incomplete_part_is_replaced_by_a_verified_download(self):
+        data, checksum = self.archive_fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / '.local-ai'
+            cache.mkdir()
+            archive = cache / ASSETS['vulkan'][0]
+            archive.with_suffix('.part').write_bytes(data[:100])
+            with patch.dict(ASSETS, {'vulkan':(archive.name,checksum)}), \
+                    patch('local_ai.platform.system', return_value='Windows'), \
+                    patch('local_ai.platform.machine', return_value='AMD64'), \
+                    patch('local_ai.urlopen', return_value=io.BytesIO(data)) as network:
+                runtime = install_runtime(root)
+            network.assert_called_once()
+            self.assertTrue((runtime / 'llama-server.exe').is_file())
+            self.assertEqual(archive.read_bytes(), data)
+
+    def test_verification_crash_keeps_download_for_the_next_setup(self):
+        data, checksum = self.archive_fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.dict(ASSETS, {'vulkan':(ASSETS['vulkan'][0],checksum)}), \
+                    patch('local_ai.platform.system', return_value='Windows'), \
+                    patch('local_ai.platform.machine', return_value='AMD64'):
+                with patch('local_ai.urlopen', return_value=io.BytesIO(data)), \
+                        patch('local_ai.verify_archive', side_effect=AttributeError('file_digest')):
+                    with self.assertRaises(AttributeError):
+                        install_runtime(root)
+                part = (root / '.local-ai' / ASSETS['vulkan'][0]).with_suffix('.part')
+                self.assertEqual(part.read_bytes(), data)
+                with patch('local_ai.urlopen') as network:
+                    runtime = install_runtime(root)
+                    network.assert_not_called()
+                self.assertTrue((runtime / 'llama-server.exe').is_file())
+                self.assertFalse(part.exists())
+
     def test_setup_verifies_then_extracts_official_layout_and_is_repeatable(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
