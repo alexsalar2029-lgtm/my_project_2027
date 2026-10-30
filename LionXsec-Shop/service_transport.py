@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener, urlopen
 
 OLLAMA_ORIGIN = 'http://127.0.0.1:11434'
+LLAMACPP_ORIGIN = 'http://127.0.0.1:8081'
 MAX_RESPONSE = 32 * 1024 * 1024
 
 
@@ -20,7 +21,7 @@ class RemoteError(Exception):
 
 class NoLocalRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        # Ollama has no redirects; a local request must never leave loopback.
+        # A local model request must never leave loopback.
         return None
 
 
@@ -57,10 +58,29 @@ def ollama_error_code(value, status=500):
     return 'ollama_http_' + str(status)
 
 
+def llamacpp_error_code(value, status=500):
+    error = value.get('error', {}) if isinstance(value, dict) else {}
+    message = error.get('message', '') if isinstance(error, dict) else error
+    message = message.lower()[:8192] if isinstance(message, str) else ''
+    if any(part in message for part in ('out of memory', 'failed to allocate', 'not enough memory')):
+        return 'llamacpp_out_of_memory'
+    if any(part in message for part in ('exceeds the available context', 'exceed context',
+                                       'context size is too small', 'exceeds the context',
+                                       'too large for the context')):
+        return 'llamacpp_context_exceeded'
+    if 'loading model' in message or 'model is loading' in message:
+        return 'llamacpp_loading'
+    return 'llamacpp_http_' + str(status)
+
+
 def http_json(url, payload=None, headers=None, timeout=80, *, local=False):
-    if local and urlsplit(url)[:2] != urlsplit(OLLAMA_ORIGIN)[:2]:
-        raise ValueError('invalid_ollama_address')
-    prefix = 'ollama_' if local else ''
+    provider = 'ollama' if local is True else local
+    if provider:
+        origin = {'ollama':OLLAMA_ORIGIN, 'llamacpp':LLAMACPP_ORIGIN}.get(provider)
+        if origin is None or urlsplit(url)[:2] != urlsplit(origin)[:2]:
+            raise ValueError('invalid_' + str(provider) + '_address')
+    prefix = str(provider) + '_' if provider else ''
+    error_code = llamacpp_error_code if provider == 'llamacpp' else ollama_error_code
     try:
         request = Request(url, None if payload is None else json.dumps(payload).encode(),
                           {'Content-Type': 'application/json', **(headers or {})})
@@ -73,7 +93,7 @@ def http_json(url, payload=None, headers=None, timeout=80, *, local=False):
             raise RemoteError(prefix + 'response_too_large')
         value = json.loads(raw)
         if local and isinstance(value, dict) and value.get('error'):
-            raise RemoteError(ollama_error_code(value), 60, pause_queue=True)
+            raise RemoteError(error_code(value), 60, pause_queue=True)
         return value
     except HTTPError as error:
         try:
@@ -87,10 +107,11 @@ def http_json(url, payload=None, headers=None, timeout=80, *, local=False):
                     value = json.loads(error.read(8192))
                 except (ValueError, OSError, http.client.HTTPException):
                     value = {}
-                code = ollama_error_code(value, error.code)
+                code = error_code(value, error.code)
         finally:
             error.close()
-        pause = error.code in (401, 403, 429) or error.code >= 500 or code == 'ollama_model_missing'
+        pause = (error.code in (401, 403, 429) or error.code >= 500 or
+                 code in ('ollama_model_missing', 'llamacpp_out_of_memory'))
         raise RemoteError(code, max(60, wait) if pause else wait, pause_queue=pause) from None
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise RemoteError(prefix + 'service_response_invalid', 60, pause_queue=True) from None
@@ -100,3 +121,7 @@ def http_json(url, payload=None, headers=None, timeout=80, *, local=False):
 
 def ollama_json(path, payload=None, timeout=5):
     return http_json(OLLAMA_ORIGIN + path, payload, timeout=timeout, local=True)
+
+
+def llamacpp_json(path, payload=None, timeout=5):
+    return http_json(LLAMACPP_ORIGIN + path, payload, timeout=timeout, local='llamacpp')

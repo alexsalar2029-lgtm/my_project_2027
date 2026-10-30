@@ -9,3 +9,4 @@ __pycache__/
 *.session-shm
 assistant-config.json
 test-results/
+.local-ai/

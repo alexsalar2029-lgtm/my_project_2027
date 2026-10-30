@@ -1,0 +1,4 @@
+# Preserve Windows launcher line endings while keeping normalized Git blobs.
+setup-local-ai.bat text eol=crlf
+start-local-ai.bat text eol=crlf
+test-local-ai.bat text eol=crlf

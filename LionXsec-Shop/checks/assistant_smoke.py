@@ -122,6 +122,7 @@ def run():
                 assert len(page.request.get(origin+'/api/assistant/posts').json()['posts'])==4
                 assert page.request.get(origin+'/api/admin/assistant').json()['counts']=={'pending':6}
                 page.locator('[name=channel]').fill('@my_channel')
+                page.locator('[name=provider]').select_option('openai')
                 page.locator('[name=bot_token]').fill('LOCAL_TEST_BOT_SENTINEL')
                 page.locator('[name=api_key]').fill('LOCAL_TEST_AI_SENTINEL')
                 with page.expect_response('**/api/admin/assistant') as saved:
@@ -148,39 +149,40 @@ def run():
                 page.reload();page.locator('[data-tab=assistant]').click()
                 expect(page.locator('[name=source]')).to_have_value('account')
                 expect(page.locator('[name=telegram_api_hash]')).to_have_value('')
-                page.locator('[name=provider]').select_option('ollama')
+                page.locator('[name=provider]').select_option('llamacpp')
                 expect(page.locator('[name=api_key]')).to_be_hidden()
-                expect(page.locator('[name=model]')).to_have_value('qwen3-vl:4b')
+                expect(page.locator('[name=model]')).to_have_value('lionxsec-gemma-3-4b')
                 with page.expect_response('**/api/admin/assistant') as local_saved:
                     page.locator('#assistant-form [type=submit]').click()
                 assert local_saved.value.status==200
-                report={'ok':False,'model':'qwen3-vl:4b','code':'ollama_connection_refused'}
-                with patch('server.check_ollama',return_value=report) as probe:
+                report={'ok':False,'model':'lionxsec-gemma-3-4b','code':'llamacpp_connection_refused'}
+                with patch('server.check_local_service',return_value=report) as probe:
                     for language in ('en','ar','es','fa'):
                         page.locator('.language').select_option(language)
                         with page.expect_response('**/api/admin/assistant/diagnostics') as checked:
                             page.locator('#assistant-check').click()
                         assert checked.value.status==200
-                        expect(page.locator('#assistant-check-result')).to_contain_text('ollama_connection_refused')
-                        assert len(page.locator('#assistant-check-result').inner_text())>len('qwen3-vl:4b · ollama_connection_refused')
+                        expect(page.locator('#assistant-check-result')).to_contain_text('llamacpp_connection_refused')
+                        assert len(page.locator('#assistant-check-result').inner_text())>len('lionxsec-gemma-3-4b · llamacpp_connection_refused')
                     assert probe.call_count==4
-                    assert probe.call_args.args[0]['provider']=='ollama'
-                report={'ok':True,'model':'qwen3-vl:4b','code':'ollama_ready'}
-                with patch('server.check_ollama',return_value=report):
+                    assert probe.call_args.args[0]['provider']=='llamacpp'
+                report={'ok':True,'model':'lionxsec-gemma-3-4b','code':'llamacpp_ready'}
+                with patch('server.check_local_service',return_value=report):
                     with page.expect_response('**/api/admin/assistant/diagnostics'):
                         page.locator('#assistant-check').click()
-                    expect(page.locator('#assistant-check-result')).to_contain_text('ollama_ready')
-                    expect(page.locator('#assistant-check-result')).to_contain_text('اجرای مدل و مصرف حافظه')
+                    expect(page.locator('#assistant-check-result')).to_contain_text('llamacpp_ready')
+                    expect(page.locator('#assistant-check-result')).to_contain_text('python local_ai.py test')
                 # A poll updates only status, retaining unsaved model/settings fields.
                 runner.stop.set();runner.thread.join(timeout=4)
-                page.locator('[name=model]').fill('qwen3-vl:2b')
+                page.locator('[name=provider]').select_option('ollama')
+                page.locator('[name=model]').fill('custom-vision-model')
                 set_runtime(store,'waiting_service','ollama_connection_closed',retry_at=1999999999)
                 expect(page.locator('#assistant-form h3 + p')).to_contain_text('صف منتظر آماده‌شدن سرویس',timeout=8000)
                 expect(page.locator('#assistant-form h3 + p')).to_contain_text('ollama_connection_closed')
-                expect(page.locator('[name=model]')).to_have_value('qwen3-vl:2b')
+                expect(page.locator('[name=model]')).to_have_value('custom-vision-model')
                 set_runtime(store,'processing',message=55)
                 expect(page.locator('#assistant-form h3 + p')).to_contain_text('در حال تحلیل پست · #55',timeout=8000)
-                expect(page.locator('[name=model]')).to_have_value('qwen3-vl:2b')
+                expect(page.locator('[name=model]')).to_have_value('custom-vision-model')
                 # A missing Telegram preview stays in the receiver queue after manual retry.
                 checkpoint(store,{'id':-1001234567890,'username':'my_channel'},SimpleNamespace(id=31),
                     payload={'message_id':31,'text':'Spotify Premium','media_kind':'photo','media':[],
@@ -205,7 +207,7 @@ def run():
                 assert not errors,errors
                 assert not external,external
                 browser.close()
-                print('PASS: real local server/browser; lion logos and contact; four languages/mobile; model/service/media errors; authenticated/CSRF-protected diagnostics, retry and rewrite; live model/receiver status; media retries stay separate from AI; unsaved settings and published posts preserved; secret redaction; zero external calls. Model/Telegram/Ollama responses simulated.')
+                print('PASS: real local server/browser; lion logos and contact; four languages/mobile; model/service/media errors; authenticated/CSRF-protected diagnostics, retry and rewrite; live model/receiver status; media retries stay separate from AI; unsaved settings and published posts preserved; secret redaction; zero external calls. AI model and Telegram responses simulated; no real Gemma generation tested.')
         finally:
             runner.stop.set();runner.thread.join(timeout=4)
             app.shutdown();app.server_close();thread.join()

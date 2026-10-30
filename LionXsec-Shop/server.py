@@ -23,7 +23,7 @@ from urllib.parse import urlsplit, unquote, parse_qs
 from content import ResourceStoreMixin, ContentError, LIMITS
 from social import DEFAULT_LINKS, validate_links
 import automation
-from assistant import Runner, read_config, save_config, check_ollama
+from assistant import Runner, read_config, save_config, check_local_service
 
 ROOT = Path(__file__).resolve().parent
 LANGS = ("fa", "en", "ar", "es")
@@ -643,7 +643,7 @@ class Handler(BaseHTTPRequestHandler):
                 if path == '/api/admin/assistant/retry' and method == 'POST':
                     return self.send({'queued': automation.requeue_failed(store)})
                 if path == '/api/admin/assistant/diagnostics' and method == 'POST':
-                    return self.send(check_ollama(read_config(store)))
+                    return self.send(check_local_service(read_config(store)))
                 if path == '/api/admin/assistant' and method == 'PUT':
                     try:
                         return self.send(save_config(store,data))
