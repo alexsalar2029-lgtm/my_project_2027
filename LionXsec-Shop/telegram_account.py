@@ -1,16 +1,16 @@
 """Read one selected channel with an explicitly authorized LOCAL Telegram session."""
 import argparse
 import asyncio
-import base64
 import getpass
 import json
 import os
 from pathlib import Path
-import tempfile
 import time
 
 from assistant import read_config
 from automation import queue_message
+from telegram_media import (document_thumbs, image_data, media_details, message_payload,
+                            message_revision, media_failure_code, video_frame_times)
 
 
 def invite_hash(value):
@@ -21,129 +21,106 @@ def invite_hash(value):
     return ''
 
 
-def media_details(message):
-    kind = next((name for name in ('video','gif','photo','audio','voice','document','sticker')
-                 if getattr(message,name,None)), '')
-    if not kind:
-        return '', ''
-    details=[]
-    document=getattr(message,'document',None)
-    for attribute in getattr(document,'attributes',[]) or []:
-        duration=getattr(attribute,'duration',None)
-        filename=getattr(attribute,'file_name',None)
-        if duration is not None and not any(value.startswith('duration:') for value in details):
-            details.append('duration: '+str(int(duration))+' seconds')
-        if filename:
-            details.append('filename: '+str(filename)[:200])
-    return ('animation' if kind=='gif' else kind), '\n'.join(details)
-
-
-def video_duration(message):
-    for attribute in getattr(getattr(message,'document',None),'attributes',[]) or []:
-        duration=getattr(attribute,'duration',None)
-        if duration is not None:
-            return max(0,float(duration))
-    return 0
-
-
-def video_frame_times(duration):
-    if duration<=1:
-        return [0]
-    values=(0,min(duration-0.2,max(1,duration*0.5)),max(0,duration-0.5))
-    return list(dict.fromkeys(round(value,2) for value in values))
-
-
-def ffmpeg_executable():
-    try:
-        import imageio_ffmpeg
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except (ImportError,RuntimeError,OSError):
-        return 'ffmpeg'
-
-
-async def video_frames(client,message,maximum_bytes=100*1024*1024):
-    size=getattr(getattr(message,'file',None),'size',0) or 0
-    if size>maximum_bytes:
-        return []
-    with tempfile.TemporaryDirectory(prefix='lionxsec-video-') as folder:
-        source=Path(folder)/'source-video'
-        try:
-            downloaded=await client.download_media(message,file=str(source))
-            if not downloaded:
-                return []
-            frames=[]
-            for index,second in enumerate(video_frame_times(video_duration(message))):
-                target=Path(folder)/('frame-'+str(index)+'.jpg')
-                process=await asyncio.create_subprocess_exec(ffmpeg_executable(),'-hide_banner','-loglevel','error',
-                    '-ss',str(second),'-i',str(downloaded),'-frames:v','1','-vf',
-                    "scale='min(960,iw)':-2",'-q:v','3','-y',str(target),
-                    stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.DEVNULL)
-                if await process.wait()==0 and target.is_file():
-                    value=image_data(target.read_bytes())
-                    if value:
-                        frames.append(value)
-            return frames[:3]
-        except (OSError,ValueError,TypeError):
-            return []
-
-
-def image_data(raw):
-    if not isinstance(raw,(bytes,bytearray)) or len(raw)>1_800_000:
-        return ''
-    if raw.startswith(b'\xff\xd8\xff'):
-        mime='image/jpeg'
-    elif raw.startswith(b'\x89PNG\r\n\x1a\n'):
-        mime='image/png'
-    elif raw.startswith(b'RIFF') and raw[8:12]==b'WEBP':
-        mime='image/webp'
-    else:
-        return ''
-    return 'data:'+mime+';base64,'+base64.b64encode(raw).decode('ascii')
-
-
-async def message_payload(client,message):
-    kind,details=media_details(message)
-    media=[]
-    try:
-        if kind=='photo':
-            value=image_data(await client.download_media(message.photo,file=bytes))
-            if value:
-                media.append(value)
-        elif kind in ('video','animation'):
-            media=await video_frames(client,message)
-        if not media and kind in ('video','animation','document','sticker') and document_thumbs(message):
-            # Offer images forwarded as files keep a thumbnail; show it to the vision model.
-            value=image_data(await client.download_media(message,file=bytes,thumb=-1))
-            if value:
-                media.append(value)
-    except Exception:
-        # Metadata/caption still reaches the model when a preview cannot be downloaded.
-        pass
-    return {'message_id':message.id,'text':getattr(message,'message','') or '',
-            'media_kind':kind,'media_description':details,'media':media}
-
-
-def document_thumbs(message):
-    document=getattr(message,'document',None) or getattr(getattr(message,'sticker',None),'thumbs',None)
-    return getattr(document,'thumbs',None) if not isinstance(document,list) else document
-
-
-def set_status(store, state, code=''):
+def set_status(store, state, code='', **details):
     with store.db() as db:
         db.execute('INSERT OR REPLACE INTO assistant_state VALUES(?,?)',
-            ('account_runtime',json.dumps({'state':state,'code':code,'updated':int(time.time())})))
+            ('account_runtime',json.dumps({'state':state,'code':code,'updated':int(time.time()),**details})))
+
+
+def record_media_failure(db, key, revision, code, attempts, missing=False):
+    failed=missing or attempts>=5
+    retry_at=0 if failed else int(time.time())+min(3600,60*2**min(attempts-1,6))
+    db.execute('INSERT OR REPLACE INTO assistant_media_pending VALUES(?,?)',(key,revision))
+    db.execute('UPDATE assistant_jobs SET status=?,attempts=?,retry_at=?,error=?,updated=? WHERE key=?',
+               ('media_failed' if failed else 'waiting_media',attempts,retry_at,code,int(time.time()),key))
 
 
 def checkpoint(store, chat, message, advance=True, payload=None):
-    """Atomically persist text and history position; same post IDs as Bot API."""
+    """Persist media retries and the cursor atomically, so later messages can continue."""
+    payload=payload or {'message_id':message.id,'text':getattr(message,'message','') or ''}
+    key=str(chat['id'])+':'+str(message.id)
     with store.db() as db:
         db.execute('BEGIN IMMEDIATE')
-        queue_message(db,chat,payload or {'message_id':message.id,'text':getattr(message,'message','') or ''})
+        if not payload.get('media_deferred') and not payload.get('unchanged'):
+            previous=db.execute('''SELECT j.attempts,m.revision FROM assistant_media_pending m
+                JOIN assistant_jobs j ON j.key=m.key WHERE m.key=?''',(key,)).fetchone()
+            queue_message(db,chat,payload)
+            if payload.get('media_error'):
+                db.execute('DELETE FROM assistant_media_seen WHERE key=?',(key,))
+                revision=payload['media_revision']
+                attempts=previous['attempts']+1 if previous and previous['revision']==revision else 1
+                record_media_failure(db,key,revision,payload['media_error'],attempts)
+            else:
+                if payload.get('media_revision'):
+                    db.execute('INSERT OR REPLACE INTO assistant_media_seen VALUES(?,?)',(key,payload['media_revision']))
+                if previous:
+                    db.execute('DELETE FROM assistant_media_pending WHERE key=?',(key,))
+                    db.execute("UPDATE assistant_jobs SET status='pending',attempts=0,retry_at=0,error='',updated=? WHERE key=?",
+                               (int(time.time()),key))
         if advance:
-            key='account_cursor:'+str(chat['id'])
-            old=db.execute('SELECT value FROM assistant_state WHERE key=?',(key,)).fetchone()
+            cursor_key='account_cursor:'+str(chat['id'])
+            old=db.execute('SELECT value FROM assistant_state WHERE key=?',(cursor_key,)).fetchone()
             position=max(int(old[0]) if old else 0,message.id)
-            db.execute('INSERT OR REPLACE INTO assistant_state VALUES(?,?)',(key,str(position)))
+            db.execute('INSERT OR REPLACE INTO assistant_state VALUES(?,?)',(cursor_key,str(position)))
+    if payload.get('media_error'):
+        print(f"Post #{message.id}: {payload['media_error']}; media saved for retry. Continuing with other posts.")
+
+
+class MediaLoader:
+    """Persist successful revisions and retry deadlines; never cache a missing preview."""
+    def __init__(self, store, chat):
+        self.store,self.chat=store,chat
+
+    async def payload(self, client, message):
+        revision=message_revision(message)
+        key=str(self.chat['id'])+':'+str(message.id)
+        with self.store.db() as db:
+            pending=db.execute('''SELECT m.revision,j.status,j.retry_at FROM assistant_media_pending m
+                JOIN assistant_jobs j ON j.key=m.key WHERE m.key=?''',(key,)).fetchone()
+            seen=db.execute('''SELECT s.revision FROM assistant_media_seen s
+                JOIN assistant_jobs j ON j.key=s.key WHERE s.key=?''',(key,)).fetchone()
+        if pending and pending['revision']==revision and (
+                pending['status']=='media_failed' or pending['retry_at']>int(time.time())):
+            return {'media_deferred':True}
+        if not pending and seen and seen['revision']==revision:
+            return {'unchanged':True}
+        if media_details(message)[0]:
+            set_status(self.store,'downloading',message=message.id)
+        return await message_payload(client,message)
+
+
+async def retry_pending_media(client, entity, store, chat, keep_going=lambda:True,
+                              payload_builder=message_payload, limit=3):
+    with store.db() as db:
+        rows=db.execute('''SELECT j.key,j.message,m.revision FROM assistant_media_pending m
+            JOIN assistant_jobs j ON j.key=m.key WHERE j.chat=? AND j.status='waiting_media'
+            AND j.retry_at<=? ORDER BY j.retry_at,j.message LIMIT ?''',
+            (str(chat['id']),int(time.time()),limit)).fetchall()
+    for row in rows:
+        if not keep_going():
+            return
+        missing=False
+        payload=None
+        try:
+            # Re-fetch the message to renew expired Telegram file references, including old posts.
+            message=await asyncio.wait_for(client.get_messages(entity,ids=row['message']),30)
+            if message is not None and type(message).__name__!='MessageEmpty':
+                payload=await payload_builder(client,message)
+            else:
+                missing=True
+                code='telegram_message_unavailable'
+        except Exception as error:
+            code=media_failure_code(error)
+        if payload is not None:
+            # Database errors must propagate; they are not Telegram download failures.
+            checkpoint(store,chat,message,advance=False,payload=payload)
+            continue
+        with store.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            current=db.execute('''SELECT m.revision,j.attempts FROM assistant_media_pending m
+                JOIN assistant_jobs j ON j.key=m.key WHERE m.key=?''',(row['key'],)).fetchone()
+            if current and current['revision']==row['revision']:
+                record_media_failure(db,row['key'],row['revision'],code,current['attempts']+1,missing)
 
 
 def last_position(store, chat_id):
@@ -190,7 +167,8 @@ async def run(args,store):
     if not config.get('telegram_api_id') or not config.get('telegram_api_hash'):
         raise SystemExit('Enter Telegram App API ID and API hash in the local admin assistant tab first.')
     session=store.path.parent/'telegram-account'
-    client=TelegramClient(str(session),int(config['telegram_api_id']),config['telegram_api_hash'])
+    client=TelegramClient(str(session),int(config['telegram_api_id']),config['telegram_api_hash'],
+                          request_retries=1,raise_last_call_error=True,flood_sleep_threshold=0)
     def active():
         current=read_config(store)
         return current['enabled'] and current['source']=='account' and all(
@@ -234,45 +212,47 @@ async def run(args,store):
         if not (permissions.is_creator or permissions.is_admin):
             raise SystemExit('Use a channel you own or administer.')
         chat={'id':utils.get_peer_id(entity),'username':getattr(entity,'username',None) or ''}
-        payload_cache={}
-        async def cached_payload(client,message):
-            edited=getattr(message,'edit_date',None)
-            key=(message.id,str(edited),getattr(message,'message','') or '')
-            if key not in payload_cache:
-                payload_cache[key]=await message_payload(client,message)
-                if len(payload_cache)>500:
-                    payload_cache.pop(next(iter(payload_cache)))
-            return payload_cache[key]
+        loader=MediaLoader(store,chat)
+        pending_edits={}
         @client.on(events.MessageEdited(chats=entity))
         async def edited(event):
             if active():
-                checkpoint(store,chat,event.message,advance=False,
-                           payload=await cached_payload(client,event.message))
-        if args.rescan_limit:
-            set_status(store,'rescanning')
-            await rescan_history(client,entity,store,chat,args.rescan_limit,active,cached_payload)
+                # Serialize downloads in the main loop, including edits and retry jobs.
+                pending_edits[event.message.id]=event.message
+        rescan_remaining=args.rescan_limit
         print('Reading the selected channel locally. Press Ctrl+C to stop.')
         while active():
             try:
+                if rescan_remaining:
+                    set_status(store,'rescanning')
+                    await rescan_history(client,entity,store,chat,rescan_remaining,active,loader.payload)
+                    rescan_remaining=0
                 set_status(store,'syncing')
-                await sync_history(client,entity,store,chat,args.history_limit,active,cached_payload)
+                await sync_history(client,entity,store,chat,args.history_limit,active,loader.payload)
                 if not active():
                     break
+                for mid,message in list(pending_edits.items()):
+                    if not active():
+                        break
+                    checkpoint(store,chat,message,advance=False,payload=await loader.payload(client,message))
+                    if pending_edits.get(mid) is message:
+                        pending_edits.pop(mid)
                 # Also pick up recent edits that happened while this receiver was offline.
                 async for message in client.iter_messages(entity,limit=50):
                     if not active():
                         break
                     checkpoint(store,chat,message,advance=False,
-                               payload=await cached_payload(client,message))
+                               payload=await loader.payload(client,message))
+                await retry_pending_media(client,entity,store,chat,active,loader.payload)
                 set_status(store,'receiving')
                 await asyncio.sleep(15)
-            except errors.FloodWaitError as error:
-                set_status(store,'rate_limited')
+            except (errors.FloodWaitError,errors.FloodPremiumWaitError) as error:
+                set_status(store,'rate_limited','telegram_rate_limited',retry_at=int(time.time())+error.seconds+1)
                 remaining=error.seconds+1
                 while remaining>0 and active():
                     await asyncio.sleep(min(5,remaining));remaining-=5
-            except (OSError,asyncio.TimeoutError):
-                set_status(store,'connection_retry')
+            except (OSError,asyncio.TimeoutError,errors.ServerError,errors.TimedOutError):
+                set_status(store,'connection_retry','telegram_connection_retry',retry_at=int(time.time())+15)
                 await asyncio.sleep(15)
         set_status(store,'stopped')
     finally:

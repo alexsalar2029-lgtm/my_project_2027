@@ -375,4 +375,4 @@ if __name__ == '__main__':
         print(f'{count} published posts queued for rewriting. Existing posts stay visible until replacement.')
     else:
         count = requeue_failed(store)
-        print(f'{count} retrying/failed jobs queued. Published and ignored posts are unchanged.')
+        print(f'{count} jobs scheduled for retry. Keep telegram_account.py watch running for media downloads. Published and ignored posts are unchanged.')

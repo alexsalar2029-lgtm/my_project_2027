@@ -3,12 +3,14 @@ from pathlib import Path
 import secrets
 import tempfile
 import threading
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from playwright.sync_api import sync_playwright, expect
 from assistant import Runner, set_runtime
 from automation import ingest, process_one
 from server import App, Store
+from telegram_account import checkpoint, set_status
 
 
 def run():
@@ -179,6 +181,23 @@ def run():
                 set_runtime(store,'processing',message=55)
                 expect(page.locator('#assistant-form h3 + p')).to_contain_text('در حال تحلیل پست · #55',timeout=8000)
                 expect(page.locator('[name=model]')).to_have_value('qwen3-vl:2b')
+                # A missing Telegram preview stays in the receiver queue after manual retry.
+                checkpoint(store,{'id':-1001234567890,'username':'my_channel'},SimpleNamespace(id=31),
+                    payload={'message_id':31,'text':'Spotify Premium','media_kind':'photo','media':[],
+                             'media_revision':'test-revision','media_error':'telegram_media_timeout'})
+                set_status(store,'downloading',message=31)
+                expect(page.locator('#assistant-receiver-status')).to_contain_text('در حال دریافت رسانه · #31',timeout=8000)
+                expect(page.locator('#assistant-recent')).to_contain_text('تلگرام دریافت فایل را در مهلت مقرر کامل نکرد')
+                for language,translated in (('en','Waiting for media'),('ar','بانتظار الوسائط'),
+                                             ('es','Esperando archivos'),('fa','در انتظار دریافت رسانه')):
+                    page.locator('.language').select_option(language)
+                    expect(page.locator('#assistant-recent')).to_contain_text(translated)
+                    assert 'telegram_media_timeout' not in page.locator('#assistant-recent').inner_text()
+                with page.expect_response('**/api/admin/assistant/retry') as media_retry:
+                    page.locator('#assistant-retry').click()
+                assert media_retry.value.json()['queued']==1
+                assert page.request.get(origin+'/api/admin/assistant').json()['counts']=={'pending':6,'waiting_media':1}
+                assert len(page.request.get(origin+'/api/assistant/posts').json()['posts'])==4
                 page.set_viewport_size({'width':390,'height':844})
                 assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
                 page.set_viewport_size({'width':1440,'height':1000})
@@ -186,7 +205,7 @@ def run():
                 assert not errors,errors
                 assert not external,external
                 browser.close()
-                print('PASS: real local server/browser; lion logos and contact; four languages/mobile; model/service errors; authenticated/CSRF-protected diagnostics, retry and rewrite; live queue/active-post updates preserve unsaved settings; secret redaction; zero external calls. Model/Telegram/Ollama responses simulated.')
+                print('PASS: real local server/browser; lion logos and contact; four languages/mobile; model/service/media errors; authenticated/CSRF-protected diagnostics, retry and rewrite; live model/receiver status; media retries stay separate from AI; unsaved settings and published posts preserved; secret redaction; zero external calls. Model/Telegram/Ollama responses simulated.')
         finally:
             runner.stop.set();runner.thread.join(timeout=4)
             app.shutdown();app.server_close();thread.join()

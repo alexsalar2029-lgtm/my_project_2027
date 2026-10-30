@@ -45,6 +45,10 @@ def initialize(store):
             media TEXT NOT NULL DEFAULT '[]');
         CREATE TABLE IF NOT EXISTS assistant_posts (
             key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS assistant_media_pending (
+            key TEXT PRIMARY KEY, revision TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS assistant_media_seen (
+            key TEXT PRIMARY KEY, revision TEXT NOT NULL);
         ''')
         # Upgrade databases created by v1.5 without discarding queued posts.
         if 'media' not in {row[1] for row in db.execute('PRAGMA table_info(assistant_jobs)')}:
@@ -178,7 +182,8 @@ def validate(result, source):
 
 def has_due_jobs(store):
     with store.db() as db:
-        return db.execute("SELECT 1 FROM assistant_jobs WHERE status IN ('pending','retry') AND retry_at<=? LIMIT 1",
+        return db.execute("""SELECT 1 FROM assistant_jobs WHERE status IN ('pending','retry') AND retry_at<=?
+                          AND key NOT IN (SELECT key FROM assistant_media_pending) LIMIT 1""",
                           (int(time.time()),)).fetchone() is not None
 
 
@@ -187,6 +192,7 @@ def process_one(store, model, max_attempts=5, *, pause_on_service_error=False, o
     with store.db() as db:
         job = db.execute("""SELECT * FROM assistant_jobs
             WHERE status IN ('pending','retry') AND retry_at<=?
+            AND key NOT IN (SELECT key FROM assistant_media_pending)
             ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, updated DESC, key LIMIT 1""",
             (int(time.time()),)).fetchone()
     if not job:
@@ -210,7 +216,8 @@ def process_one(store, model, max_attempts=5, *, pause_on_service_error=False, o
                 'model_response_invalid' if isinstance(exc, ValueError) else getattr(exc,'code','provider_unavailable'))
         attempts = job['attempts']+1
         with store.db() as db:
-            db.execute('UPDATE assistant_jobs SET attempts=?,status=?,retry_at=?,error=? WHERE key=? AND digest=?',
+            db.execute('''UPDATE assistant_jobs SET attempts=?,status=?,retry_at=?,error=? WHERE key=? AND digest=?
+                       AND key NOT IN (SELECT key FROM assistant_media_pending)''',
                        (attempts,'failed' if attempts>=max_attempts else 'retry',int(time.time())+max(min(3600,30*2**attempts),min(3600,getattr(exc,'retry',0))),code,job['key'],job['digest']))
         if pause_on_service_error and isinstance(exc, RemoteError) and exc.pause_queue:
             # The runner waits once for the service, instead of immediately failing every job.
@@ -218,7 +225,8 @@ def process_one(store, model, max_attempts=5, *, pause_on_service_error=False, o
         return True
     with store.db() as db:
         db.execute('BEGIN IMMEDIATE')
-        current = db.execute('SELECT digest FROM assistant_jobs WHERE key=?', (job['key'],)).fetchone()
+        current = db.execute('''SELECT digest FROM assistant_jobs WHERE key=?
+            AND key NOT IN (SELECT key FROM assistant_media_pending)''', (job['key'],)).fetchone()
         if not current or current[0] != job['digest']:
             return True
         if item['kind'] == 'ignore':
@@ -258,9 +266,14 @@ def requeue_published(store):
 
 def requeue_failed(store):
     with store.db() as db:
-        return db.execute("""UPDATE assistant_jobs SET status='pending',attempts=0,
+        count = db.execute("""UPDATE assistant_jobs SET status='pending',attempts=0,
             retry_at=0,error='',updated=? WHERE status IN ('retry','failed')""",
             (int(time.time()),)).rowcount
+        count += db.execute("""UPDATE assistant_jobs SET status='waiting_media',attempts=0,
+            retry_at=0,error='',updated=? WHERE status IN ('waiting_media','media_failed')
+            AND key IN (SELECT key FROM assistant_media_pending)
+            AND (status='media_failed' OR attempts>0 OR retry_at>0 OR error!='')""", (int(time.time()),)).rowcount
+        return count
 
 
 def status(store):

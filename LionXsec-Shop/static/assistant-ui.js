@@ -15,18 +15,24 @@ export async function renderAssistant(container,mutate){
  container.querySelector('pre').textContent=Object.entries(result.counts).map(([key,count])=>(names[key]||key)+': '+count).join('\n')||'—';
  const form=container.querySelector('form');
  const recovery={
-  fa:{button:'تلاش دوباره موارد ناموفق',help:'فقط پست‌های ناموفق و در انتظار تلاش مجدد به صف برمی‌گردند. ابتدا تنظیمات مدل را ذخیره کنید؛ دستیار باید فعال باشد.',queued:'تعداد پست‌های آمادهٔ تلاش دوباره',attempts:'تلاش ناموفق',next:'تلاش بعدی'},
-  en:{button:'Retry failed posts',help:'Requeue failed posts and scheduled retries only. Save model settings first and enable the assistant to process them.',queued:'Posts queued for another attempt',attempts:'Failed attempts',next:'Next retry'},
-  ar:{button:'إعادة محاولة المنشورات الفاشلة',help:'تُعاد فقط المنشورات الفاشلة والمحاولات المجدولة. احفظ إعدادات النموذج أولًا وفعّل المساعد.',queued:'المنشورات الجاهزة لإعادة المحاولة',attempts:'المحاولات الفاشلة',next:'المحاولة التالية'},
-  es:{button:'Reintentar publicaciones fallidas',help:'Reintenta solo los fallos y reintentos programados. Guarda la configuración del modelo y activa el asistente.',queued:'Publicaciones listas para reintentar',attempts:'Intentos fallidos',next:'Próximo intento'}
+  fa:{button:'تلاش دوباره موارد ناموفق',help:'پست‌های ناموفق دوباره صف می‌شوند. دستیار باید فعال باشد؛ برای موارد در انتظار رسانه، فرمان watch دریافت‌کنندهٔ تلگرام هم باید در حال اجرا باشد.',queued:'تعداد پست‌های آمادهٔ تلاش دوباره',attempts:'تلاش ناموفق',next:'تلاش بعدی'},
+  en:{button:'Retry failed posts',help:'Requeue failed posts and scheduled retries. Enable the assistant; keep the Telegram watch receiver running for posts waiting for media.',queued:'Posts queued for another attempt',attempts:'Failed attempts',next:'Next retry'},
+  ar:{button:'إعادة محاولة المنشورات الفاشلة',help:'تُعاد المنشورات الفاشلة والمحاولات المجدولة. فعّل المساعد وأبقِ مستقبل Telegram watch قيد التشغيل لتنزيل الوسائط.',queued:'المنشورات الجاهزة لإعادة المحاولة',attempts:'المحاولات الفاشلة',next:'المحاولة التالية'},
+  es:{button:'Reintentar publicaciones fallidas',help:'Reintenta los fallos y reintentos programados. Activa el asistente y mantén el receptor Telegram watch en ejecución para descargar archivos.',queued:'Publicaciones listas para reintentar',attempts:'Intentos fallidos',next:'Próximo intento'}
  }[lang];
+ const receiverText=receiver=>{
+  const r=receiver||{state:'not_started'};
+  return (names[r.state]||r.state)+(r.message?' · #'+r.message:'')+(r.code?' · '+assistantError(r.code)+' ('+r.code+')':'')+(r.retry_at?' · '+recovery.next+': '+new Date(r.retry_at*1000).toLocaleTimeString(lang):'');
+ };
  const renderRecent=state=>{
+  const receiver=form.querySelector('#assistant-receiver-status');
+  if(receiver&&state.receiver)receiver.textContent=receiverText(state.receiver);
   if(state.runtime){
    const r=state.runtime;
    form.querySelector('h3 + p').textContent=(names[r.state]||r.state)+(r.message?' · #'+r.message:'')+(r.code?' · '+assistantError(r.code)+' ('+r.code+')':'')+(r.retry_at?' · '+recovery.next+': '+new Date(r.retry_at*1000).toLocaleTimeString(lang):'');
   }
   form.querySelector('pre').textContent=Object.entries(state.counts).map(([key,count])=>(names[key]||key)+': '+count).join('\n')||'—';
-  form.querySelector('#assistant-recent').innerHTML=state.recent.map(r=>`<p dir="auto">#${r.message} · ${esc(names[r.status]||r.status)}${r.error?' · '+esc(assistantError(r.error)):''}${r.attempts?' · '+esc(recovery.attempts)+': '+r.attempts:''}${r.status==='retry'&&r.retry_at?' · '+esc(recovery.next)+': '+esc(new Date(r.retry_at*1000).toLocaleTimeString(lang)):''}</p>`).join('');
+  form.querySelector('#assistant-recent').innerHTML=state.recent.map(r=>`<p dir="auto">#${r.message} · ${esc(names[r.status]||r.status)}${r.error?' · '+esc(assistantError(r.error)):''}${r.attempts?' · '+esc(recovery.attempts)+': '+r.attempts:''}${['retry','waiting_media'].includes(r.status)&&r.retry_at?' · '+esc(recovery.next)+': '+esc(new Date(r.retry_at*1000).toLocaleTimeString(lang)):''}</p>`).join('');
  };
  renderRecent(result);
  form.insertAdjacentHTML('beforeend',`<div class="assistant-rewrite"><p class="small muted">${esc(recovery.help)}</p><button type="button" class="button secondary" id="assistant-retry">${esc(recovery.button)}</button><p id="assistant-retry-result" role="status"></p></div>`);
@@ -61,7 +67,7 @@ export async function renderAssistant(container,mutate){
  form.elements.channel.maxLength=200;
  const accountLabels={fa:{source:'روش دریافت تلگرام',bot:'ربات (پست‌های جدید)',account:'حساب کاربری (تاریخچه، کانال خصوصی و رسانه)',provider:'روش تحلیل هوش مصنوعی',openai:'OpenAI آنلاین (نیازمند اعتبار API)',ollama:'Ollama محلی رایگان',help:'App API ID و API hash را ذخیره کنید. حساب باید از قبل عضو و مدیر کانال خصوصی باشد. سپس روی همین دستگاه، python telegram_account.py login و بعد python telegram_account.py watch را اجرا کنید. کپشن، نوع رسانه و تصویر پیش‌نمایش عکس/ویدیو تحلیل می‌شود. شماره تلفن، کد ورود و رمز دومرحله‌ای فقط در ترمینال محلی وارد می‌شوند.',receiver:'دریافت‌کننده حساب'},en:{source:'Telegram intake',bot:'Bot (new posts)',account:'User account (history, private channels and media)',provider:'AI analysis provider',openai:'Online OpenAI (API billing required)',ollama:'Free local Ollama',help:'Save the App API ID and API hash here. The account must already be a member and admin of a private channel. Run python telegram_account.py login, then python telegram_account.py watch on this device. Captions, media type and photo/video previews are analyzed. Enter your phone, login code and two-step password only in your local terminal.',receiver:'Account receiver'}};
  const a=accountLabels[lang]||accountLabels.en;
- form.querySelector('h2').insertAdjacentHTML('afterend',`<label class="field">${esc(a.source)}<select name="source"><option value="bot">${esc(a.bot)}</option><option value="account">${esc(a.account)}</option></select></label><div id="account-fields"><p class="notice">${esc(a.help)}</p><label class="field">Telegram App API ID<input name="telegram_api_id" dir="ltr" inputmode="numeric" maxlength="16" value="${esc(c.telegram_api_id||'')}"></label><label class="field">Telegram API hash · ${c.telegram_api_hash_set?'✓':'—'}<input name="telegram_api_hash" type="password" dir="ltr" autocomplete="new-password" maxlength="32" placeholder="${esc(l.placeholder)}"></label><p>${esc(a.receiver)}: ${esc(result.receiver?.state||'not_started')}</p></div>`);
+ form.querySelector('h2').insertAdjacentHTML('afterend',`<label class="field">${esc(a.source)}<select name="source"><option value="bot">${esc(a.bot)}</option><option value="account">${esc(a.account)}</option></select></label><div id="account-fields"><p class="notice">${esc(a.help)}</p><label class="field">Telegram App API ID<input name="telegram_api_id" dir="ltr" inputmode="numeric" maxlength="16" value="${esc(c.telegram_api_id||'')}"></label><label class="field">Telegram API hash · ${c.telegram_api_hash_set?'✓':'—'}<input name="telegram_api_hash" type="password" dir="ltr" autocomplete="new-password" maxlength="32" placeholder="${esc(l.placeholder)}"></label><p>${esc(a.receiver)}: <span id="assistant-receiver-status">${esc(receiverText(result.receiver))}</span></p></div>`);
  form.querySelector('#account-fields').insertAdjacentHTML('afterend',`<label class="field">${esc(a.provider)}<select name="provider"><option value="openai">${esc(a.openai)}</option><option value="ollama">${esc(a.ollama)}</option></select></label>`);
  form.elements.source.value=c.source||'bot';
  form.elements.provider.value=c.provider||'openai';
