@@ -28,6 +28,9 @@ jobs:
         with:
           python-version: '3.11'
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
       - name: Prepare universal Python dependencies
         working-directory: ScalpHamrah/src
         run: |
