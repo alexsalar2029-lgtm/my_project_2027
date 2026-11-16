@@ -1,4 +1,4 @@
-name: Scalp Hamrah Android Preview
+name: LionXsec Android Preview
 on:
   push:
     branches: [main]
@@ -53,10 +53,10 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - name: Offline Android 15 smoke test
+      - name: Offline Android 16 smoke test
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 35
+          api-level: 36
           arch: x86_64
           target: google_apis
           profile: pixel_6
@@ -83,12 +83,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p ScalpHamrah/downloads
-          cp ScalpHamrah/src/android/app/build/outputs/apk/debug/app-debug.apk ScalpHamrah/downloads/ScalpHamrah-0.1.0-preview.apk
+          cp ScalpHamrah/src/android/app/build/outputs/apk/debug/app-debug.apk ScalpHamrah/downloads/ScalpHamrah-0.2.0-preview.apk
           cp ScalpHamrah/source.zip ScalpHamrah/downloads/ScalpHamrah-source.zip
           cp ScalpHamrah/src/RELEASE_NOTES_FA.md ScalpHamrah/downloads/
           cp ScalpHamrah/src/android-preview.png ScalpHamrah/downloads/
-          printf 'Commit: %s\nAndroid smoke: API35 x86_64 offline\nBroker login/trades: NOT tested\n' "$GITHUB_SHA" > ScalpHamrah/downloads/VALIDATION.txt
+          printf 'Commit: %s\nAndroid smoke: API36 x86_64 offline\nBroker login/trades: NOT tested\n' "$GITHUB_SHA" > ScalpHamrah/downloads/VALIDATION.txt
           cat ScalpHamrah/src/engine-tests.txt ScalpHamrah/src/mobile-tests.txt >> ScalpHamrah/downloads/VALIDATION.txt
           cd ScalpHamrah/downloads
           sha256sum *.apk *.zip > SHA256SUMS.txt
-          gh release create "scalp-hamrah-preview-0.1.0-${GITHUB_RUN_NUMBER}" ./* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title 'اسکالپ همراه 0.1.0 — پیش‌نمایش اندروید' --notes-file RELEASE_NOTES_FA.md
+          gh release create "scalp-hamrah-preview-0.2.0-${GITHUB_RUN_NUMBER}" ./* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title 'LionXsec 0.2.0 — پیش‌نمایش اندروید' --notes-file RELEASE_NOTES_FA.md
