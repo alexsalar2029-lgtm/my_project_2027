@@ -1,11 +1,11 @@
-name: Scalp Hamrah Android Preview
+name: LionXsec Android
 on:
   push:
     branches: [main]
     paths: ['ScalpHamrah/**', '.github/workflows/scalp-hamrah-android.yml']
   workflow_dispatch:
 permissions:
-  contents: write
+  contents: read
 concurrency:
   group: scalp-hamrah-preview
   cancel-in-progress: true
@@ -13,9 +13,13 @@ jobs:
   android:
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [26, 36]
     steps:
       - uses: actions/checkout@v4
-      - name: Verify and unpack the reviewed source
+      - name: Verify and unpack source
         run: |
           cd ScalpHamrah
           sha256sum -c source.sha256
@@ -36,27 +40,29 @@ jobs:
         run: |
           python -m pip install -r requirements-mobile.lock pytest==9.1.1 PyYAML==6.0.2
           python prepare_wheels.py
-      - name: Test engine, manual mode and history audit offline
+      - name: Test engine, wallet selection and history audit offline
         working-directory: ScalpHamrah/src
         run: |
           set -o pipefail
-          python -m pytest -q engine/tests | tee engine-tests.txt
-          python -m pytest -q mobile-runtime/test_mobile.py audit/test_month_audit.py | tee mobile-tests.txt
+          python -m pytest -q engine/tests mobile-runtime/test_mobile.py audit/test_month_audit.py | tee python-tests.txt
       - name: Build APK, lint and unit tests
         working-directory: ScalpHamrah/src/android
         run: |
           sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
           chmod +x gradlew
           ./gradlew --no-daemon :app:assembleDebug :app:testDebugUnitTest :app:lintDebug :app:assembleDebugAndroidTest
+          python ../verify_apk.py app/build/outputs/apk/debug/app-debug.apk > ../binary-compatibility.json
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 app/build/outputs/apk/debug/app-debug.apk
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify app/build/outputs/apk/debug/app-debug.apk
       - name: Enable emulator hardware acceleration
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - name: Offline Android 15 smoke test
+      - name: Offline Android UI and Python smoke test
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 35
+          api-level: ${{ matrix.api }}
           arch: x86_64
           target: google_apis
           profile: pixel_6
@@ -64,31 +70,51 @@ jobs:
           script: |
             cd ScalpHamrah/src/android && ./gradlew --no-daemon connectedDebugAndroidTest
             adb install -r ScalpHamrah/src/android/app/build/outputs/apk/debug/app-debug.apk
-            adb shell am start -n app.lordxau.mobile/.MainActivity
-            sleep 3
-            adb exec-out screencap -p > ScalpHamrah/src/android-preview.png
+            python ScalpHamrah/src/capture_ui.py ScalpHamrah/src/screens
       - name: Preserve build and test evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scalp-hamrah-build-evidence
+          name: lionxsec-evidence-${{ matrix.api }}
           path: |
-            ScalpHamrah/src/*tests.txt
+            ScalpHamrah/src/python-tests.txt
+            ScalpHamrah/src/binary-compatibility.json
             ScalpHamrah/src/android/app/build/reports/
             ScalpHamrah/src/android/app/build/outputs/androidTest-results/
-            ScalpHamrah/src/android-preview.png
+            ScalpHamrah/src/screens/
           retention-days: 30
-      - name: Publish downloadable preview only after successful checks
+      - name: Prepare release candidate
+        if: matrix.api == 36
+        run: |
+          mkdir -p candidate
+          cp ScalpHamrah/src/android/app/build/outputs/apk/debug/app-debug.apk candidate/LionXsec-0.3.0.apk
+          cp ScalpHamrah/source.zip candidate/LionXsec-source.zip
+          cp ScalpHamrah/src/RELEASE_NOTES_FA.md ScalpHamrah/src/USER_GUIDE_FA.md candidate/
+          cp ScalpHamrah/src/binary-compatibility.json ScalpHamrah/src/screens/*.png candidate/
+          printf 'Commit: %s\nEmulator tests required: Android 8/API26 and Android 16/API36 x86_64\nBroker login/trades: NOT tested live\nPhysical Redmi Android16: NOT tested\n' "$GITHUB_SHA" > candidate/VALIDATION.txt
+          cat ScalpHamrah/src/python-tests.txt >> candidate/VALIDATION.txt
+          cd candidate
+          sha256sum *.apk *.zip > SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        if: matrix.api == 36
+        with:
+          name: lionxsec-release-candidate
+          path: candidate/
+          retention-days: 30
+  publish:
+    needs: android
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: lionxsec-release-candidate
+          path: candidate
+      - name: Publish only after both emulator versions pass
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p ScalpHamrah/downloads
-          cp ScalpHamrah/src/android/app/build/outputs/apk/debug/app-debug.apk ScalpHamrah/downloads/ScalpHamrah-0.1.0-preview.apk
-          cp ScalpHamrah/source.zip ScalpHamrah/downloads/ScalpHamrah-source.zip
-          cp ScalpHamrah/src/RELEASE_NOTES_FA.md ScalpHamrah/downloads/
-          cp ScalpHamrah/src/android-preview.png ScalpHamrah/downloads/
-          printf 'Commit: %s\nAndroid smoke: API35 x86_64 offline\nBroker login/trades: NOT tested\n' "$GITHUB_SHA" > ScalpHamrah/downloads/VALIDATION.txt
-          cat ScalpHamrah/src/engine-tests.txt ScalpHamrah/src/mobile-tests.txt >> ScalpHamrah/downloads/VALIDATION.txt
-          cd ScalpHamrah/downloads
-          sha256sum *.apk *.zip > SHA256SUMS.txt
-          gh release create "scalp-hamrah-preview-0.1.0-${GITHUB_RUN_NUMBER}" ./* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title 'اسکالپ همراه 0.1.0 — پیش‌نمایش اندروید' --notes-file RELEASE_NOTES_FA.md
+          cd candidate
+          sha256sum -c SHA256SUMS.txt
+          gh release create "lionxsec-0.3.0-${GITHUB_RUN_NUMBER}" ./* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title 'LionXsec 0.3.0 — آموزش متحرک و اجرای روی گوشی' --notes-file RELEASE_NOTES_FA.md
