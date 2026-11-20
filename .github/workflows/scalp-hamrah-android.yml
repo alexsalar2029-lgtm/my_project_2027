@@ -87,7 +87,7 @@ jobs:
         if: matrix.api == 36
         run: |
           mkdir -p candidate
-          cp ScalpHamrah/src/android/app/build/outputs/apk/debug/app-debug.apk candidate/LionXsec-0.3.0.apk
+          cp ScalpHamrah/src/android/app/build/outputs/apk/debug/app-debug.apk candidate/LionXsec-0.4.0.apk
           cp ScalpHamrah/source.zip candidate/LionXsec-source.zip
           cp ScalpHamrah/src/RELEASE_NOTES_FA.md ScalpHamrah/src/USER_GUIDE_FA.md candidate/
           cp ScalpHamrah/src/binary-compatibility.json ScalpHamrah/src/screens/*.png candidate/
@@ -117,4 +117,4 @@ jobs:
         run: |
           cd candidate
           sha256sum -c SHA256SUMS.txt
-          gh release create "lionxsec-0.3.0-${GITHUB_RUN_NUMBER}" ./* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title 'LionXsec 0.3.0 — آموزش متحرک و اجرای روی گوشی' --notes-file RELEASE_NOTES_FA.md
+          gh release create "lionxsec-0.4.0-${GITHUB_RUN_NUMBER}" ./* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title 'LionXsec 0.4.0 — اتصال مرحله‌ای، حساب یورویی و آموزش تصویری' --notes-file RELEASE_NOTES_FA.md
